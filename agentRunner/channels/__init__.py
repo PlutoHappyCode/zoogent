@@ -24,7 +24,7 @@ def build_channel(name: str, cfg: dict) -> Channel:
 def build_feishu_channels(feishu_cfg: dict) -> dict[str, Channel]:
     """按 channels.feishu.accounts 逐账号实例化。
     跳过：enabled=false、凭证不完整（default 账号 app_id 为空时也跳过）"""
-    from .feishu import FeishuChannel
+    from .feishu.channel import FeishuChannel
 
     shared = {"reactions": feishu_cfg.get("reactions", {}),
               "card": feishu_cfg.get("card", {}),

@@ -15,7 +15,7 @@
 - 人格文件热加载：改 soul/rules/cron/记忆不用重启，下一条消息生效
 
 **飞书原生交互**
-- 卡片回复（标题=人格名，footer=模型/tokens/耗时）、表情状态（Typing→PARTY）
+- 卡片回复（标题=人格名，footer=模型/tokens/耗时）、**三阶段表情**（举手→敲键盘→撒花）
 - 尾部编号选项自动渲染成可点按钮
 - 消息类型：文字 / 富文本(post 展平) / **图文混排**(嵌图下载+多图视觉) /
   语音(faster-whisper 本地转写) / 图片(视觉模型) /
@@ -24,11 +24,26 @@
 - 定时任务推送也走卡片（失败降级纯文本）
 
 **记忆体系（三层）**
-- 注入层：system prompt = soul + rules + 共享知识 + 记忆索引（确定性在场）
+- 注入层（常驻层）：system prompt = 精简画像 + soul + rules + 限长记忆索引，
+  lean 模式常驻 ~700 tokens；`prompt.lean: false` 可回滚全量注入的 classic 版
 - 工具层：`memory_list/read/write/search`，沙箱在本人格 memory/，防穿越
 - 语义层：`kb_search` RAG 检索（shared + 全部工作产出 + 本人格记忆，
   BGE-M3 embedding，sqlite 向量库，惰性增量更新，人格隔离）
 - 会话：超长自动摘要（前情提要），每轮落盘重启不丢
+
+**Prompt 瘦身（渐进式披露，2026-08-06 起默认开启）**
+- 原则：元数据>全文，索引>详情，检索>预装，摘要>原文
+- 五刀：① 用户画像摘要化（shared/userBrief.md 常驻，全文靠
+  kb_search 按需检索）② 共享知识/踩坑记录不再预装，改为检索指针
+  ③ 记忆索引限长（顶层文件 + 子目录计数，详情用 memory_list）
+  ④ 输出格式规则压成 5 条禁止清单
+  ⑤ 极简注入版：每个人格一份 `<agent>/lean.md`（soul+rules 手工
+  压缩合并，~45%），lean 模式下替代全文注入；soul.md/rules.md
+  原文保留（classic 回滚 / 检索底料）
+- 效果：常驻层 ~6500 → ~2000 字符（-70%），测试实测
+- 工具集收敛：agent.json 按人格分配 skills（stock 仅
+  housekeeper/finance），受限人格在 rules.md 声明能力边界，
+  没有的工具如实说没有、不硬编
 
 **技能（即插即用）**
 - `stock` 股票行情/分析
@@ -69,8 +84,8 @@ Zootopia/     工作区：每个 Agent 的产出落盘位置
 
 ```
 zoogent/                # 项目根目录
-├── agent-runner/       # 代码：Agent 运行时
-│   ├── agent.json      #   中央配置（本地默认位置，NAS 上指向 SSD 数据目录）
+├── agent.json          # 中央配置（本地默认位置，NAS 上指向 SSD 数据目录）
+├── agentRunner/       # 代码：Agent 运行时
 │   ├── .env            #   密钥（AGENT_API_KEY、FEISHU_*_APP_ID/SECRET……）
 │   ├── main.py         #   装配入口：校验配置 → 起渠道 → 起调度器/哨兵
 │   ├── core/           #   Agent 引擎（渠道无关，所有智能在这里）
@@ -83,7 +98,8 @@ zoogent/                # 项目根目录
 │   │   ├── log.py      #     统一日志：控制台 + 轮转文件
 │   │   └── scheduler.py#     cron 定时 + 欠条哨兵 + 触发记录落盘
 │   ├── channels/       #   渠道层（feishu 多账号 / terminal 调试）
-│   └── tests/          #   离线自测（55 项，仅 1 次真实模型调用）
+│   │   └── feishu/     #     按职责拆分：_loop_proxy / _owner / _parser / _card / channel
+│   └── tests/          #   离线自测（runAllTests 64 项 + test_feishu_modules 53 项）
 │
 ├── AgentsHome/         # 人格与能力的家（数据+技能，可整体备份迁移）
 │   ├── skills/         #   技能（每个 .py = 一组工具，SCHEMAS + FUNCTIONS）
@@ -98,7 +114,7 @@ zoogent/                # 项目根目录
 ### 业务流程：一条消息的生命之旅
 
 ```
-【第 1 站】飞书渠道收货（channels/feishu.py · on_message）
+【第 1 站】飞书渠道收货（channels/feishu/channel.py · on_message）
   你在飞书发消息 → ws 长连接推给对应机器人
   ├─ 白名单校验（agent.json 的 whitelist 总开关 + 各账号 owner_open_ids）
   ├─ owner.json 记下你的 chat_id（以后定时任务往这里推，加锁读写）
@@ -112,12 +128,17 @@ zoogent/                # 项目根目录
   ├─ 是引用回复？→ 按 parent_id 把被引用消息内容拉下来，
   │    拼成【你引用了：…】+ 你的新话
   ├─ 是斜杠命令？（/agents /agent /who）→ 直接处理，旅程结束
-  └─ 贴上「Typing」表情（处理中），转交后台线程
+  └─ 贴上「举手」表情（表示已收到），转交后台线程
+       │
+       ▼
+【第 2 站】后台线程切换表情（channels/feishu/channel.py · _process_with_reaction）
+  ├─ 撕掉「举手」表情
+  └─ 贴上「敲键盘」表情（表示正在处理）
        │
        ▼
 【第 2 站】引擎接棒（core/engine.py · run_agent_meta）
   ├─ 确定人格：固定人格机器人直接用本人格；
-  │    多人格账号查 chat_agents.json 里的绑定（加锁）
+  │    多人格账号查 chatAgents.json 里的绑定（加锁）
   ├─ 取会话锁：同一（人格+chat）串行处理，你连发三条也不会乱
   └─ 你说的是「继续」？→ 核销 pending.json 欠条，重放原任务
        │
@@ -126,16 +147,17 @@ zoogent/                # 项目根目录
   ├─ 取会话：内存没有 → 从磁盘 sessions/*.json 恢复（重启不丢）
   ├─ 人格文件指纹（soul/rules/shared/记忆的 mtime）变了？
   │    → 原地热加载 system prompt，对话历史保留（改人格不用重启）
-  ├─ 组装 system prompt：
-  │    用户画像 + soul + rules + 工作区路径 + 共享知识 + 共享踩坑
-  │    + 记忆索引（只列文件名，正文不进 prompt 省 token）
-  │    + 通用纪律 + journal 指引 + 输出格式 + 按钮约定
+  ├─ 组装 system prompt（prompt.lean 双模式）：
+  │    lean（默认）：精简画像 + soul + rules + 工作区路径
+  │    + 检索指针（共享知识/踩坑记录用 kb_search 按需取，不预装）
+  │    + 限长记忆索引（顶层文件 + 子目录计数）+ 5 条禁止清单
+  │    classic：全量注入（画像全文 + 共享知识 + 踩坑记录），回滚用
   └─ 追加你的消息 → _trim：超 30 条先把旧对话摘要进 summary.md
        （_safe_cut 保证裁切点不落在工具调用组中间，防止会话被切坏）
        （下轮以「前情提要」带出，不暴力砍头）
        │
        ▼
-【第 4 站】模型主循环（core/models.py → Kimi k3，最多 10 轮）
+【第 4 站】模型主循环（core/engine.py → Kimi k3，最多 20 轮）
   chat_with_retry 把对话发给模型（失败指数退避重试 6 次）
   ├─ 模型说"我要调工具" → engine 按工具名分发执行：
   │    memory_*  → 本人格 memory/ 沙箱（防路径穿越）
@@ -146,6 +168,8 @@ zoogent/                # 项目根目录
   │    web_search → NAS 自建 SearXNG(:8181) 联网取证，web_fetch 细读
   │    stock / feishu_docs → 行情接口 / lark-cli
   │    结果塞回对话 → 再问模型（工具报错也返回说明，不炸循环）
+  │    ⚡ Token 优化：含 tool_calls 的 assistant 消息，reasoning 超过 200
+  │       字符自动截断，节省 60-80% token 消耗
   └─ 模型直接回答 → 出循环，进下一站
        │
        ├─【岔路·故障】6 次重试全败 → 记欠条 pending.json
@@ -156,8 +180,8 @@ zoogent/                # 项目根目录
   └─ 会话落盘 sessions/*.json（每轮一次，重启接着聊）
        │
        ▼
-【第 6 站】卡片送达到你（channels/feishu.py · reply_card）
-  ├─ 撕掉「Typing」，贴上「PARTY」（完成）
+【第 6 站】卡片送达到你（channels/feishu/channel.py · reply_card）
+  ├─ 撕掉「敲键盘」，贴上「撒花」（完成）
   └─ 飞书卡片：标题=人格名、正文 lark_md 渲染、
        尾部 1. 2. 3. 编号自动生成可点按钮、footer=模型·tokens·用时
 ```
@@ -196,11 +220,12 @@ zoogent/                # 项目根目录
 ## 快速上手
 
 ```bash
-cd agent-runner
+cd agentRunner
 python main.py                      # 启动（⚠️ 同一时刻只能有一个实例在跑）
-python tests/run_all_tests.py       # 全功能离线自测（55 项）
-python tests/test_pending.py        # 欠条机制自测（13 项）
-python tests/test_concurrency.py    # 并发锁压力自测（3 项）
+python tests/runAllTests.py       # 全功能离线自测（64 项）
+python tests/test_feishu_modules.py # feishu 模块拆分验证（53 项）
+python tests/testPending.py        # 欠条机制自测（13 项）
+python tests/testConcurrency.py    # 并发锁压力自测（3 项）
 ```
 
 飞书里：`/who` 看当前人格；每个机器人固定一个人格，换人找对应机器人；

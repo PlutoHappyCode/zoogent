@@ -1,6 +1,6 @@
-"""并发保护验证：多线程同时压 pending.json / chat_agents.json / 会话锁。
+"""并发保护验证：多线程同时压 pending.json / chatAgents.json / 会话锁。
 
-用法：../.venv/bin/python tests/test_concurrency.py
+用法：../.venv/bin/python tests/testConcurrency.py
 不 mock 模型，只压共享状态；跑完清理临时数据。
 """
 import sys
@@ -76,7 +76,7 @@ def stress_session_lock() -> bool:
 
 results = [
     ("pending.json 并发读写不损坏", stress_pending()),
-    ("chat_agents.json 并发读写不损坏", stress_bindings()),
+    ("chatAgents.json 并发读写不损坏", stress_bindings()),
     ("同一会话锁互斥（无交错）", stress_session_lock()),
 ]
 for name, ok in results:

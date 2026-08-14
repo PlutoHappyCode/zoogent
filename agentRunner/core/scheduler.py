@@ -15,6 +15,7 @@ core/scheduler.py — 调度器：让 Agent 主动找你说话（多账号版）
 轻量设计，不引第三方依赖。
 """
 
+import hashlib
 import json
 import threading
 import time
@@ -123,7 +124,7 @@ def start_scheduler(channels: dict, default_name: str = "default") -> None:
             today = now.strftime("%Y-%m-%d")
 
             for job in load_jobs():
-                key = f"{job['agent']}|{job['time']}|{hash(job['instruction'])}"
+                key = f"{job['agent']}|{job['time']}|{hashlib.md5(job['instruction'].encode()).hexdigest()[:8]}"
                 if current_time != job["time"] or fired.get(key) == today:
                     continue
                 target = resolve_push_channel(job["agent"], channels,

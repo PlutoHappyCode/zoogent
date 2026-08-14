@@ -7,6 +7,7 @@ evals.py — 回归测试：改 prompt / 结构后跑一遍，防止 agent 悄�
   ## 用例 标题
   Q: 你是谁？
   A: 程序猴, coder2        ← 回答应包含的关键词，逗号分隔
+                             「a|b」表示命中任一即可（应对措辞随机性）
 
 用法：
   python evals.py              # 测所有 agent
@@ -52,7 +53,9 @@ def run_evals(agent: str) -> tuple[int, int]:
     for i, case in enumerate(cases):
         # 每条用例独立会话（chat_id 用 eval 前缀，和真实会话隔离）
         answer = run_agent(f"eval-{agent}-{i}-{time_salt()}", case["q"], agent=agent)
-        missing = [k for k in case["keywords"] if k not in answer]
+        # 关键词支持「a|b」或语法：命中任一即算通过（模型措辞有随机性）
+        missing = [k for k in case["keywords"]
+                   if not any(alt in answer for alt in k.split("|"))]
         if missing:
             print(f"  ❌ [{agent}] {case['title']}：缺少关键词 {missing}")
             print(f"     回答：{answer[:100]}…")

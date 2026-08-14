@@ -118,8 +118,8 @@ def _shared_knowledge() -> str:
         return ""
     parts = []
     for p in sorted(shared_dir.glob("*.md")):
-        if p.name in ("tools.md", "user.md"):
-            continue  # user.md 单独注入；tools.md 是给人看的自动文档
+        if p.name in ("tools.md", "user.md", "userBrief.md"):
+            continue  # user.md/userBrief.md 单独注入；tools.md 是给人看的自动文档
         text = p.read_text(encoding="utf-8")
         if len(text) <= 3000:
             parts.append(text.strip())
@@ -128,10 +128,86 @@ def _shared_knowledge() -> str:
     return "\n\n".join(parts)
 
 
+def _prompt_lean() -> bool:
+    """system prompt 瘦身模式开关（agent.json → prompt.lean，默认开）。
+    关掉即回到全量注入的 classic 版，观察期发现问题可一行配置回滚"""
+    return bool(get().get("prompt", {}).get("lean", True))
+
+
+def _user_brief() -> str:
+    """精简用户画像（shared/userBrief.md：几行摘要 + open_id 映射）。
+    全文留在 shared/user.md 由 kb_search 按需检索；brief 缺失时降级全量"""
+    return _read_home_file("shared/userBrief.md") or _read_home_file("shared/user.md")
+
+
+def _memory_index_lean(agent: str) -> str:
+    """限长记忆索引：只列顶层 .md + 子目录文件数（如 journal/ 32 篇）。
+    替代全量文件清单——列表会随记忆增长无限变长，详情交给 memory_list"""
+    mem_dir = _memory_dir(agent)
+    top_files = sorted(p.name for p in mem_dir.iterdir()
+                       if p.is_file() and p.suffix == ".md"
+                       and p.name != "summary.md")
+    sub_dirs = []
+    for d in sorted(mem_dir.iterdir()):
+        if not d.is_dir() or d.name == "archive":
+            continue
+        n = sum(1 for _ in d.rglob("*.md"))
+        if n:
+            sub_dirs.append(f"- {d.name}/（{n} 篇，用 memory_list 查看）")
+    lines = [f"- {f}" for f in top_files] + sub_dirs
+    return "\n".join(lines) if lines else "（空）"
+
+
 def build_system_prompt(agent: str) -> str:
-    """提示词组装链：shared/user.md（人）→ soul（我是谁）→ rules（怎么干活）
-    → 共享知识库 → 共享踩坑 → 记忆索引 → 通用纪律。
-    记忆正文不进提示词，用工具按需读 —— 控制 token 成本"""
+    """提示词组装（两种模式，prompt.lean 切换）：
+    lean   —— 瘦身版：画像摘要化、共享知识/踩坑进知识库按需检索、
+              记忆索引限长、格式规则压成禁止清单（常驻层 ~700 tokens）
+    classic —— 全量注入版（观察期回滚用）"""
+    if _prompt_lean():
+        return _build_prompt_lean(agent)
+    return _build_prompt_classic(agent)
+
+
+def _build_prompt_lean(agent: str) -> str:
+    agent_dir = _agent_dir(agent)
+    # 极简注入版：soul+rules 的手工压缩合并版（约 45%），缺失时降级全量
+    lean_md = agent_dir / "lean.md"
+    if lean_md.exists():
+        identity = lean_md.read_text(encoding="utf-8")
+    else:
+        soul = (agent_dir / "soul.md").read_text(encoding="utf-8")
+        rules = _read_home_file(f"{agent}/rules.md")
+        identity = f"{soul}\n\n{rules}"
+
+    return f"""【用户画像·简版】
+{_user_brief()}
+（完整背景需要时用 kb_search 检索，如 kb_search("用户画像 职业经历")）
+
+{identity}
+
+【工作区】
+- 灵魂的家（身份/记忆）：{agent_dir}
+- 默认输出目录（交付物/临时文件）：{agent_workspace(agent)}
+
+【知识与踩坑】
+团队共享知识（术语表、用户画像全文）、踩坑记录、历史产出都在知识库，按需检索：
+- 碰飞书 API、部署运维、文件格式等没把握的事，先 kb_search("踩坑 " + 关键词)
+- 找历史报告/资料：kb_search；找当前任务的既有方法：kb_search("技能 " + 任务名)
+
+【长期记忆】（索引只列大概，详情用工具读）
+{_memory_index_lean(agent)}
+用 memory_read / memory_search 按需读取；任务进度变化时用 memory_write 更新对应文件。
+
+【纪律（禁止清单）】
+1. 禁止凭印象编造事实：工具能查的（行情/记忆/历史）必须先调工具；时效性信息先 web_search 取证
+2. 禁止输出大段无格式文字：第一句加粗给结论；多维度用 ### 小标题分段（每段 ≤4 行）；并列用 -、步骤用 1. 2. 3.；不主动用表格
+3. 编号选项克制：只在需要用户选择或推荐下一步时，结尾用 `1.` `2.` `3.` 逐行列出（会渲染成按钮）；禁止 emoji 数字编号；禁止硬凑选项、禁止说"我无法发送按钮"
+4. 当天有实质交流（任务/决策/新偏好），结束前把要点 append 进 memory/journal/当天日期.md，不用先读直接写
+5. 回答用中文，适配手机阅读，不说空话套话
+"""
+
+
+def _build_prompt_classic(agent: str) -> str:
     agent_dir = _agent_dir(agent)
     user = _read_home_file("shared/user.md")
     soul = (agent_dir / "soul.md").read_text(encoding="utf-8")

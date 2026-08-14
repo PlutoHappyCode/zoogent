@@ -8,7 +8,7 @@
 ┌─ 镜像 zoogent:latest ──────────────────────────────┐
 │  运行环境：node:18 + python3.11 venv + lark-cli     │
 │  封死不动，只有依赖变了才重建                        │
-├─ 代码（agent-runner/）──────────────────────────────┤
+├─ 代码（agentRunner/）──────────────────────────────┤
 │  本地改 → 上传 → docker restart 生效（不用重建镜像）  │
 ├─ 数据（zoogent/，SSD 外挂）──────────────────────────┤
 │  agent.json 配置 + 人格/记忆/技能 + 工作区            │
@@ -19,7 +19,7 @@
 
 | 挂载（docker run -v） | 容器内路径 | 作用 | 谁会写它 |
 |---|---|---|---|
-| `~/agent-system` | `/app` | 代码（agent-runner 在 `/app/agent-runner`） | 你（上传代码） |
+| `~/agent-system` | `/app` | 代码（agentRunner 在 `/app/agentRunner`） | 你（上传代码） |
 | SSD `zoogent` | `/data/zoogent` | **活数据**：agent.json + AgentsHome + Zootopia | 你 + agent |
 | `~/lark-cli-config` | `/root/.lark-cli` | lark-cli 授权配置 | lark-cli 自己 |
 
@@ -44,7 +44,7 @@ zoogent 在 `/data_n003/data/udata/real/15112331127/zoogent`）。
 cd /Users/pluto/Desktop/zoogent
 COPYFILE_DISABLE=1 tar czf /tmp/agent-deploy.tar.gz \
   --exclude='.venv' --exclude='__pycache__' --exclude='.DS_Store' \
-  agent-runner AgentsHome Zootopia
+  agentRunner AgentsHome Zootopia
 scp -P 12345 /tmp/agent-deploy.tar.gz 15112331127@192.168.31.52:~/
 
 # 2. NAS 上解压、建数据目录、同步数据到 zoogent
@@ -80,13 +80,13 @@ sudo docker logs -f zoogent
 
 ```bash
 # 上传代码（在本地项目根目录执行）
-scp -P 12345 -r agent-runner 15112331127@192.168.31.52:~/agent-system/
+scp -P 12345 -r agentRunner 15112331127@192.168.31.52:~/agent-system/
 # 新增/变更人格文件时同步到 zoogent（注意是数据目录，不是代码目录）
 scp -P 12345 -r AgentsHome/* 15112331127@192.168.31.52:$ZOOGENT/AgentsHome/
 
 # 常用运维（docker 需要 sudo）
 sudo docker logs -f zoogent     # 看日志（实时）
-tail -100 ~/agent-system/agent-runner/logs/agent.log   # 看日志（落盘）
+tail -100 ~/agent-system/agentRunner/logs/agent.log   # 看日志（落盘）
 sudo docker restart zoogent     # 改完代码重启生效
 sudo docker ps                  # 看状态
 ```
@@ -168,7 +168,16 @@ lark-cli auth status                # 确认身份
 ## 改配置注意
 
 - `agent.json` 支持 `//` 注释和 `${VAR}` / `${VAR:-默认值}`（从 .env / 环境变量替换）
-- 配置文件位置：默认 `agent-runner/agent.json`；.env 里设 `AGENT_CONFIG`
+- 配置文件位置：默认项目根目录 `agent.json`；.env 里设 `AGENT_CONFIG`
   可指向别处（NAS 上指向 `/data/zoogent/agent.json`）
 - 改 `cron.md` / soul.md / rules.md / shared / memory：**不用重启**
 - 改 `agent.json` / .env / 技能代码：**要重启**
+
+## 安全加固
+
+- `.env` 和 `agent.json` 已在 `.gitignore` 中，不会被提交到 Git
+- `.env` 文件权限应为 `600`（仅所有者可读）：`chmod 600 agentRunner/.env`
+- `agent.json` 中 API Key 应使用 `${VAR}` 引用环境变量，不要明文写死
+- `config.py` 启动时会自动检测：明文 key 会告警，`.env`/`agent.json` 权限过宽也会告警
+- `workspace` 技能的 shell 命令默认 strict 档，仅允许只读白名单命令
+- 如需放宽 shell 限制，改 `agent.json → tools.workspace.posture` 为 `auto` 或调整 `strict_allowlist`

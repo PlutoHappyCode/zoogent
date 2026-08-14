@@ -1,6 +1,7 @@
 # 密钥与环境
 .env
 *.env
+/agent.json
 
 # Python
 .venv/
@@ -8,8 +9,8 @@ __pycache__/
 *.pyc
 
 # 运行状态（会话/绑定/日志/触发记录）
-agent-runner/memory/
-agent-runner/logs/
+agentRunner/memory/
+agentRunner/logs/
 
 # 私有数据（人格/记忆/工作产出，不进 git——含个人信息）
 AgentsHome/

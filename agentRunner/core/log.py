@@ -6,7 +6,7 @@ core/log.py — 统一日志：控制台 + 轮转文件
 `log.info(...) / log.warning(...)` 替代 print。
 
 - 控制台：保持原来的 emoji 风格输出（docker logs 里看的一样）
-- 文件：agent-runner/logs/agent.log，单文件 5MB、保留 3 个备份，
+- 文件：agentRunner/logs/agent.log，单文件 5MB、保留 3 个备份，
   带时间戳和级别，排障不用盯着实时日志
 - 可在 agent.json 加 "logging" 节覆盖：
   {"level": "INFO", "max_mb": 5, "backups": 3}

@@ -1,16 +1,16 @@
 """
-tests/run_all_tests.py — agent-runner 全功能自动化测试
+tests/runAllTests.py — agentRunner 全功能自动化测试
 ========================================================
 
 用法：
-    cd agent-runner
-    ../.venv/bin/python tests/run_all_tests.py
+    cd agentRunner
+    ../.venv/bin/python tests/runAllTests.py
 
 覆盖：配置层 / 人格层 / 记忆沙箱 / 会话摘要 / 引擎 / 调度器 /
       渠道（离线）/ 依赖隔离 / 端到端（唯一真实模型调用）/ 冒烟。
 
 所有测试数据使用临时目录/临时文件，测完清理，
-不在 AgentsHome 或 agent-runner/memory 留下残留。
+不在 AgentsHome 或 agentRunner/memory 留下残留。
 """
 
 import contextlib
@@ -110,8 +110,12 @@ finally:
 # 2. 人格层
 # ---------------------------------------------------------------
 print("\n===== 2. 人格层 =====")
-PROMPT_MARKS = ["杨晨", "【工作区】", "【全队共享知识库】",
-                "【全队共享踩坑记录】", "【长期记忆索引】", "【通用纪律】"]
+LEAN = cfg.get("prompt", {}).get("lean", True)
+PROMPT_MARKS = (
+    ["【用户画像·简版】", "【工作区】", "【知识与踩坑】", "【长期记忆】", "【纪律（禁止清单）】"]
+    if LEAN else
+    ["示例用户", "【工作区】", "【全队共享知识库】",
+     "【全队共享踩坑记录】", "【长期记忆索引】", "【通用纪律】"])
 
 prompt_fail = []
 for agent in disk_agents:
@@ -124,8 +128,9 @@ for agent in disk_agents:
             prompt_fail.append(f"{agent} 缺 {lacks}")
     except Exception as e:
         prompt_fail.append(f"{agent} 异常 {e}")
-check("8 个人格 build_system_prompt 全部成功且要素齐全",
-      not prompt_fail, "；".join(prompt_fail) or "画像/soul/工作区/共享库/踩坑/记忆索引/纪律 均在")
+check(f"{len(disk_agents)} 个人格 build_system_prompt 全部成功且要素齐全"
+      f"（{'lean' if LEAN else 'classic'} 模式）",
+      not prompt_fail, "；".join(prompt_fail) or "各模式必备要素均在")
 
 display_fail = []
 for agent in disk_agents:
@@ -151,6 +156,59 @@ try:
           f"{len(disk_agents)} → {len(filtered)}")
 finally:
     cfg["agents"]["members"]["cto"]["enabled"] = orig_enabled
+
+# prompt.lean 双模式：瘦身版显著更短、不含全量注入段、带检索指针
+_orig_lean = cfg.get("prompt", {}).get("lean", True)
+try:
+    cfg.setdefault("prompt", {})["lean"] = True
+    p_lean = personas.build_system_prompt("finance")
+    cfg["prompt"]["lean"] = False
+    p_classic = personas.build_system_prompt("finance")
+    check("prompt.lean 切换：瘦身版更短、不注入全量踩坑、带 kb_search 指针",
+          len(p_lean) < len(p_classic)
+          and "【知识与踩坑】" in p_lean and "kb_search" in p_lean
+          and "【全队共享踩坑记录】" in p_classic
+          and "【全队共享踩坑记录】" not in p_lean,
+          f"lean={len(p_lean)} 字符 vs classic={len(p_classic)} 字符"
+          f"（省 {len(p_classic) - len(p_lean)}）")
+finally:
+    cfg["prompt"]["lean"] = _orig_lean
+
+_tmp_jr = personas.home() / "finance" / "memory" / "journal" / "autotest_lean_idx.md"
+_tmp_jr.parent.mkdir(parents=True, exist_ok=True)
+_tmp_jr.write_text("索引限长测试", encoding="utf-8")
+try:
+    idx = personas._memory_index_lean("finance")
+    check("记忆索引限长：子目录折叠为计数、不逐文件列出",
+          "journal/（" in idx and "篇，用 memory_list 查看" in idx
+          and "autotest_lean_idx" not in idx,
+          f"共 {len(idx.splitlines())} 行")
+finally:
+    _tmp_jr.unlink(missing_ok=True)
+
+brief = personas._user_brief()
+full_user = personas._read_home_file("shared/user.md")
+check("精简画像：userBrief.md 生效且远短于全量画像",
+      "open_id" in brief and 0 < len(brief) < len(full_user) // 2,
+      f"brief={len(brief)} 字符 vs user.md={len(full_user)} 字符")
+
+# 极简注入版 lean.md：人人格都有、比 soul+rules 短、且真的被注入
+_lean_bad = []
+for _a in disk_agents:
+    _lm = personas.home() / _a / "lean.md"
+    if not _lm.exists():
+        _lean_bad.append(f"{_a} 缺 lean.md")
+        continue
+    _lm_text = _lm.read_text(encoding="utf-8")
+    _orig = ((personas.home() / _a / "soul.md").read_text(encoding="utf-8")
+             + (personas.home() / _a / "rules.md").read_text(encoding="utf-8"))
+    if len(_lm_text) >= len(_orig):
+        _lean_bad.append(f"{_a} 未压缩")
+check("极简注入版：人人格有 lean.md、均比 soul+rules 短且被注入",
+      not _lean_bad and all(
+          (personas.home() / a / "lean.md").read_text(encoding="utf-8").splitlines()[0]
+          in personas._build_prompt_lean(a) for a in disk_agents),
+      "；".join(_lean_bad) or f"{len(disk_agents)} 个人格在档")
 
 # ---------------------------------------------------------------
 # 3. 记忆工具（沙箱）
@@ -206,7 +264,7 @@ finally:
         BINDINGS.write_text(bindings_backup, encoding="utf-8")
     elif BINDINGS.exists():
         BINDINGS.unlink()
-    check("chat_agents.json 测试绑定已清理",
+    check("chatAgents.json 测试绑定已清理",
           TEST_CHAT not in memory._load_bindings(), "文件已还原")
 
 summary_file = personas.home() / "finance" / "memory" / "summary.md"
@@ -274,16 +332,19 @@ import core.engine as engine  # noqa: E402
 tool_names = sorted(s["function"]["name"] for s in engine.TOOL_SCHEMAS)
 stock_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "stock")
 feishu_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items()
-                      if o == "feishu_docs")
+                      if o == "feishuDocs")
 mem_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "memory")
-web_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "web_search")
+web_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "webSearch")
 kb_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "knowledge")
-check("TOOL_SCHEMAS 共 20 个（stock6+feishu5+memory4+web2+kb3）",
-      len(tool_names) == 20 and len(stock_tools) == 6
+ws_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "workspace")
+check("TOOL_SCHEMAS 共 24 个（stock6+feishu5+memory4+web2+kb3+ws4）",
+      len(tool_names) == 24 and len(stock_tools) == 6
       and len(feishu_tools) == 5 and len(mem_tools) == 4
-      and len(web_tools) == 2 and len(kb_tools) == 3,
+      and len(web_tools) == 2 and len(kb_tools) == 3
+      and len(ws_tools) == 4,
       f"stock={len(stock_tools)} feishu={len(feishu_tools)} "
-      f"memory={len(mem_tools)} web={len(web_tools)} kb={len(kb_tools)}")
+      f"memory={len(mem_tools)} web={len(web_tools)} kb={len(kb_tools)} "
+      f"ws={len(ws_tools)}")
 check("TOOL_ORIGIN 溯源正确（无未标注工具）",
       all(n in engine.TOOL_ORIGIN for n in tool_names),
       f"来源：{sorted(set(engine.TOOL_ORIGIN.values()))}")
@@ -333,7 +394,7 @@ finally:
 # ---------------------------------------------------------------
 print("\n===== 5.5 搜索与知识库 =====")
 sys.path.insert(0, str(Path(cfg["tools"]["skills_dir"])))
-import web_search as ws_mod  # noqa: E402
+import webSearch as ws_mod  # noqa: E402
 import knowledge as kb_mod  # noqa: E402
 
 # web_search / web_fetch：mock HTTP，验证解析与降级
@@ -439,6 +500,47 @@ check("ASR 降级：依赖缺失/文件不存在返回空串不炸",
       asr_mod.transcribe("/tmp/不存在的音频.opus") == "", "graceful")
 
 # ---------------------------------------------------------------
+# 5.6 workspace 技能（沙箱）
+# ---------------------------------------------------------------
+print("\n===== 5.6 workspace 技能（沙箱） =====")
+import workspace as ws_mod  # noqa: E402
+
+memory.set_current_agent("cto")
+_ws_root = personas.agent_workspace("cto")
+
+check("workspace 路径逃逸拦截：../ 越界读写被拒",
+      "已拦截" in ws_mod.file_read("../../agent.json")
+      and "已拦截" in ws_mod.file_write("../../evil.md", "x"),
+      f"root={_ws_root}")
+
+_ws_f = "autotest_workspace.md"
+ws_mod.file_write(_ws_f, "霓虹灯塔")
+_r = ws_mod.file_read(_ws_f)
+ws_mod.file_write(_ws_f, "追加一行", mode="append")
+_r2 = ws_mod.file_read(_ws_f)
+check("workspace 文件读写：覆盖/追加/读取往返正确",
+      _r == "霓虹灯塔" and "霓虹灯塔" in _r2 and "追加一行" in _r2,
+      f"read={_r!r}")
+
+check("workspace strict 档：写类命令被白名单拦截、元字符被拒",
+      "已拦截" in ws_mod.shell("rm autotest_workspace.md")
+      and "已拦截" in ws_mod.shell("ls | grep x"),
+      "rm / 管道均拦截")
+
+_ls = ws_mod.shell("ls")
+check("workspace strict 档：只读命令放行且 cwd 是工作区",
+      _ws_f in _ls, f"ls 输出含测试文件")
+
+(_ws_root / _ws_f).unlink(missing_ok=True)
+memory.set_current_agent("housekeeper")
+check("workspace 技能过滤：cto 可见 file_read、askme 不可见",
+      any(s["function"]["name"] == "file_read"
+          for s in engine._schemas_for("cto"))
+      and not any(s["function"]["name"] == "file_read"
+                  for s in engine._schemas_for("askme")),
+      "按 agent.json skills 分配")
+
+# ---------------------------------------------------------------
 # 6. 调度器
 # ---------------------------------------------------------------
 print("\n===== 6. 调度器 =====")
@@ -536,12 +638,12 @@ check("卡片 markdown 标题降级为加粗", "**大标题**" in md_content and
 flat = feishu_mod._flatten_post([
     [{"tag": "text", "text": "第一段 "},
      {"tag": "a", "text": "链接", "href": "https://example.com"}],
-    [{"tag": "at", "name": "Pluto"}, {"tag": "text", "text": " 第二段"},
+    [{"tag": "at", "name": "测试用户"}, {"tag": "text", "text": " 第二段"},
      {"tag": "img", "image_key": "img_x"}],
 ])
 check("富文本 post 展平为纯文本（text/a/at/img + 换行）",
       flat == ("第一段 链接(https://example.com)\n"
-               "@Pluto 第二段[图片]"),
+               "@测试用户 第二段[图片]"),
       repr(flat[:40]))
 
 # 图文混排：_post_image_keys 提取嵌图 key
@@ -653,17 +755,22 @@ with tempfile.TemporaryDirectory() as tmpdir:
     tmp_owner = Path(tmpdir) / "owner.json"
     orig_owner_file = feishu_mod.OWNER_FILE
     try:
+        # 拆分后 OWNER_FILE 在 _owner 子模块里，需要同时 patch
+        import channels.feishu._owner as _owner_internal
+        orig_internal = _owner_internal.OWNER_FILE
+        _owner_internal.OWNER_FILE = tmp_owner
         feishu_mod.OWNER_FILE = tmp_owner
         tmp_owner.write_text(json.dumps({"ou_old": "oc_old"}, ensure_ascii=False),
                              encoding="utf-8")
-        data = feishu_mod._load_owner()  # 触发迁移
+        data = _owner_internal._load_owner()  # 触发迁移
         migrated = data.get("default", {}).get("ou_old") == "oc_old"
-        feishu_mod._save_owner("finance", "ou_a", "oc_fin")
-        ns_ok = (feishu_mod.get_target_chat("finance") == "oc_fin"
-                 and feishu_mod.get_target_chat("default") == "oc_old")
+        _owner_internal._save_owner("finance", "ou_a", "oc_fin")
+        ns_ok = (_owner_internal.get_target_chat("finance") == "oc_fin"
+                 and _owner_internal.get_target_chat("default") == "oc_old")
         check("owner.json 命名空间读写 + 旧平铺格式自动迁移",
               migrated and ns_ok,
               f"迁移后={json.loads(tmp_owner.read_text(encoding='utf-8'))}")
+        _owner_internal.OWNER_FILE = orig_internal
     finally:
         feishu_mod.OWNER_FILE = orig_owner_file
 
@@ -722,9 +829,9 @@ designer_summary_pre = designer_summary.exists()
 try:
     answer, meta = engine.run_agent_meta(
         E2E_CHAT, "你好，请用一句话介绍你自己", agent="designer")
-    if answer == "模型服务暂时不可用，请稍后重试 🙏":
+    if "不可用" in str(answer) and "欠条" in str(answer):
         report("WARN", "端到端：模型调用（外部服务不可用，非代码 bug）",
-               "chat_with_retry 重试后仍失败")
+               "chat_with_retry 重试后仍失败，已走欠条流程")
     else:
         check("端到端：designer 真实回答 + meta 完整",
               bool(answer and answer.strip())
@@ -735,6 +842,7 @@ except Exception as e:
     report("WARN", "端到端：模型调用（外部服务异常，非代码 bug）", f"{type(e).__name__}: {e}")
 finally:
     memory.delete_session("designer", E2E_CHAT)  # 连内存带磁盘一起清
+    memory.pop_pending("designer", E2E_CHAT)     # 模型故障时测试记的欠条也要核销
     if not designer_summary_pre and designer_summary.exists():
         designer_summary.unlink()
     check("端到端残留已清理（会话 + designer summary.md）",

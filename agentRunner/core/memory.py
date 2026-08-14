@@ -136,7 +136,7 @@ MEMORY_FUNCTIONS = {
 # ===============================================================
 SESSIONS: dict[str, list] = {}
 _SESSION_FP: dict[str, tuple] = {}  # 会话 key → 人格文件指纹（热加载用）
-BINDINGS_FILE = MEMORY_DIR / "chat_agents.json"
+BINDINGS_FILE = MEMORY_DIR / "chatAgents.json"
 
 # --- 并发保护 ----------------------------------------------------
 # 飞书每条消息一个线程，同一 chat 连发两条会并发跑主循环，
@@ -189,7 +189,7 @@ def _persist_enabled() -> bool:
 
 # ---------------------------------------------------------------
 # 会话落盘：每个（人格+chat）一个 json 文件，重启不丢对话。
-# 存 agent-runner/memory/sessions/<agent>--<chat_id>.json：
+# 存 agentRunner/memory/sessions/<agent>--<chat_id>.json：
 #   {"messages": [...], "fp": 人格文件指纹}
 # 每轮回答结束由 engine 调 save_session 写一次；重启后 _get_session
 # 优先从磁盘恢复，指纹变了顺带热加载 system prompt。
@@ -252,7 +252,7 @@ def _load_bindings() -> dict:
     return {}
 
 
-# chat_agents.json 的读改写全程一把锁：/agent 切换与消息路由并发时不丢更新
+# chatAgents.json 的读改写全程一把锁：/agent 切换与消息路由并发时不丢更新
 _BINDINGS_LOCK = threading.Lock()
 
 

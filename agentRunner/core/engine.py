@@ -40,6 +40,68 @@ from .personas import agent_display, agent_skills, home, list_agents
 
 log = get_logger("engine")
 
+
+# ===============================================================
+# 流式卡片收集器：累积 token / 触发更新节流
+# ===============================================================
+class StreamCollector:
+    """累积流式 token，记录首字时间，按 token 数 / 时间节流触发更新。
+
+    参数：
+      min_delta       — 最少累积多少字符才触发一次 on_update（防止频繁 API 调用）
+      flush_interval  — 最长多少秒强制触发一次 on_update（即便没到 min_delta）
+      on_update(text) — 节流后的节流回调，供渠道刷新卡片
+      on_done(text)   — 流结束时的最终回调
+    """
+
+    def __init__(self,
+                 min_delta: int = 40,
+                 flush_interval: float = 1.0,
+                 on_update=None,
+                 on_done=None) -> None:
+        self.buffer = ""
+        self.first_token_ts: float | None = None
+        self.last_flush_ts: float = 0.0
+        self.last_flush_len: int = 0
+        self.min_delta = max(1, int(min_delta))
+        self.flush_interval = max(0.1, float(flush_interval))
+        self.on_update = on_update
+        self.on_done = on_done
+
+    def __call__(self, delta: str) -> None:
+        """每收到一段 delta 就调一下"""
+        if not delta:
+            return
+        if self.first_token_ts is None:
+            self.first_token_ts = time.time()
+        self.buffer += delta
+        now = time.time()
+        if (len(self.buffer) - self.last_flush_len >= self.min_delta
+                or now - self.last_flush_ts >= self.flush_interval):
+            self._flush(now)
+
+    def _flush(self, now: float | None = None, force: bool = False) -> None:
+        now = now if now is not None else time.time()
+        if not force and now - self.last_flush_ts < 0.05:
+            return
+        self.last_flush_ts = now
+        self.last_flush_len = len(self.buffer)
+        if self.on_update:
+            try:
+                self.on_update(self.buffer)
+            except Exception as e:
+                log.warning("stream on_update 失败: %s", e)
+
+    def finalize(self) -> str:
+        """强制 flush，记录最终文本"""
+        self._flush(force=True)
+        if self.on_done:
+            try:
+                self.on_done(self.buffer)
+            except Exception as e:
+                log.warning("stream on_done 失败: %s", e)
+        return self.buffer
+
 # ===============================================================
 # 技能加载器
 # ===============================================================
@@ -105,7 +167,7 @@ def write_tools_md() -> None:
 
     def _origin_path(origin: str) -> str:
         if origin == "memory":
-            return "agent-runner/core/memory.py 内置"
+            return "agentRunner/core/memory.py 内置"
         p = skills_dir / f"{origin}.py"
         try:
             return str(p.relative_to(project_root))
@@ -120,7 +182,7 @@ def write_tools_md() -> None:
     lines = [
         "# 工具清单（自动生成，请勿手改）",
         "",
-        f"> 由 agent-runner 启动时生成，模型：{model_id()}",
+        f"> 由 agentRunner 启动时生成，模型：{model_id()}",
         "> 手写的工具使用约定请写在 shared/tools_custom.md",
         "",
         "每个分组 = 一个技能文件；新增技能 = 往 skills 目录丢一个新 .py，重启生效。",
@@ -161,35 +223,78 @@ def chat_with_retry(messages: list, tools: list | None = None,
     return None
 
 
+def chat_with_streaming(messages: list, collector: StreamCollector | None = None,
+                        tools: list | None = None,
+                        retries: int = 3,
+                        model_name: str = "default"):
+    """流式调用 chat.completions.create(stream=True)。
+
+    返回 (content_text, usage)。content_text 为最终文本；
+    若提供 StreamCollector，会把每段增量 delta 送入 collector(delta)。
+    失败（全部重试耗尽）返回 (None, None)，由调用方决定是否降级。
+    """
+    kwargs = {"model": model_id(model_name), "messages": messages,
+              "tools": tools if tools is not None else TOOL_SCHEMAS,
+              "stream": True}
+    for attempt in range(retries):
+        try:
+            stream = get_client(model_name).chat.completions.create(**kwargs)
+            content_chunks: list[str] = []
+            usage = None
+            for chunk in stream:
+                # 某些 SDK 在最后一块附带 usage
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    content_chunks.append(delta)
+                    if collector is not None:
+                        collector(delta)
+            text = "".join(content_chunks)
+            return text, usage
+        except (RateLimitError, APIError) as e:
+            log.warning("stream 调用失败 attempt=%d: %s", attempt + 1, e)
+            if attempt == retries - 1:
+                return None, None
+            time.sleep(min(2 ** (attempt + 1), 15))
+        except Exception as e:  # noqa: BLE001 — 流式过程中的网络错误
+            log.warning("stream 异常 attempt=%d: %s", attempt + 1, e)
+            if attempt == retries - 1:
+                return None, None
+            time.sleep(min(2 ** (attempt + 1), 15))
+    return None, None
+
+
 # ===============================================================
 # Agent 主循环
 # ===============================================================
 def run_agent_meta(chat_id: str, user_input: str,
                    agent: str | None = None, account: str = "unknown",
-                   max_steps: int = 10,
+                   max_steps: int | None = None,
                    image_b64: str | None = None) -> tuple[str, dict]:
     """Agent 主循环，返回 (回答, 元数据)。
-    元数据：model / tokens（累计消耗）/ elapsed（秒），给卡片 footer 用；
-    pending=True 表示本次因模型持续失败已记欠条（哨兵靠它判断）。
-    用户说「继续」时，自动核销并重放该 chat 的欠条任务。
-    image_b64：本轮附带的图片（视觉模型），单个 base64 或列表（图文混排多图），
-    只服务当前一轮——循环结束后历史里的图片会被替换成文本占位符，
-    否则 base64 留在会话里每轮都烧 token"""
+
+    max_steps: None = 从 agent.json 读取（agent 级别 > 全局 > 默认 20）
+    """
     agent = agent or get_chat_agent(chat_id)
-    # 同一（人格+chat）全程串行：飞书每条消息一个线程，连发两条
-    # 会并发跑主循环，不加锁两个线程会向同一个 messages list
-    # 交错 append，会话历史直接乱掉
     with session_lock(agent, chat_id):
         return _run_agent_meta(chat_id, user_input, agent, account,
                                max_steps, image_b64)
 
 
 def _run_agent_meta(chat_id: str, user_input: str, agent: str,
-                    account: str, max_steps: int,
+                    account: str, max_steps: int | None,
                     image_b64: str | None) -> tuple[str, dict]:
     """主循环本体（调用方已持有该会话锁）"""
     set_current_agent(agent)  # 记忆工具靠它知道当前人格
     model_name = agent_model_name(agent)
+
+    if max_steps is None:
+        cfg = get()
+        agent_cfg = cfg.get("agents", {}).get("members", {}).get(agent, {})
+        global_steps = cfg.get("agents", {}).get("max_steps", 20)
+        max_steps = agent_cfg.get("max_steps", global_steps)
+
     tools = _schemas_for(agent)
     t0 = time.time()
     total_tokens = 0
@@ -240,7 +345,15 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
             if getattr(response, "usage", None):
                 total_tokens += response.usage.total_tokens or 0
             message = response.choices[0].message
-            messages.append(message.model_dump(exclude_none=True))
+
+            # 截断含 tool_calls 的 assistant 消息内容，节省 token。
+            # 模型在 tool_calls 之前常写大量中文推理文本，对后续 tool 调用无用。
+            msg_dict = message.model_dump(exclude_none=True)
+            if message.tool_calls and msg_dict.get("content"):
+                reasoning = str(msg_dict["content"])
+                if len(reasoning) > 200:
+                    msg_dict["content"] = reasoning[:200] + "…（推理已省略）"
+            messages.append(msg_dict)
 
             if not message.tool_calls:
                 answer = message.content
@@ -280,7 +393,7 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
 
 def run_agent(chat_id: str, user_input: str,
               agent: str | None = None, account: str = "unknown",
-              max_steps: int = 10) -> str:
+              max_steps: int | None = None) -> str:
     """兼容旧调用：只要回答文本（scheduler 等场景用）"""
     return run_agent_meta(chat_id, user_input, agent=agent,
                           account=account, max_steps=max_steps)[0]

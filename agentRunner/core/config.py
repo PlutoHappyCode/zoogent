@@ -5,12 +5,12 @@ core/config.py — 中央配置加载（agent.json + .env）
 agent.json 支持 JSONC 风格注释（// 行注释、/* */ 块注释），
 字符串里的 ${VAR} 从环境变量（含 .env）替换。
 
-配置文件位置：默认 agent-runner/agent.json；.env 或环境变量里设
-AGENT_CONFIG 可指向别处（NAS 上指向 SSD 数据目录 /data/zoogent/agent.json，
-人格/记忆/配置统一管理）。
+配置文件位置：默认项目根目录 agent.json（agentRunner 的上一级）；
+.env 或环境变量里设 AGENT_CONFIG 可指向别处（NAS 上指向 SSD 数据目录
+/data/zoogent/agent.json，人格/记忆/配置统一管理）。
 
 语义约定：
-  - agents.home 支持相对路径（相对 agent-runner 目录解析）
+  - agents.home 等支持相对路径（相对配置文件所在目录解析）
   - channels.feishu.owner_open_ids：每个元素做 ${VAR} 替换，
     单个元素内含逗号则拆分，替换后为空字符串的项剔除
   - agents.members 未列出的 agent = 默认启用、default 模型、全部技能；
@@ -22,8 +22,8 @@ import os
 import re
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent   # agent-runner/
-CONFIG_FILE = BASE_DIR / "agent.json"               # 默认位置（AGENT_CONFIG 可覆盖）
+BASE_DIR = Path(__file__).resolve().parent.parent   # agentRunner/
+CONFIG_FILE = BASE_DIR.parent / "agent.json"        # 默认位置：项目根目录（AGENT_CONFIG 可覆盖）
 ENV_FILE = BASE_DIR / ".env"
 
 _config: dict | None = None
@@ -96,13 +96,14 @@ def _substitute(node):
     return node
 
 
-def _normalize(cfg: dict) -> dict:
-    # agents.home / agents.workspace 相对路径 → 相对 agent-runner 目录解析
+def _normalize(cfg: dict, base_dir: Path) -> dict:
+    # agents.home / agents.workspace 相对路径 → 相对配置文件所在目录解析
+    # 绝对路径（以 / 开头）直接用
     agents = cfg.setdefault("agents", {})
-    home = agents.get("home", "../AgentsHome")
-    agents["home"] = str((BASE_DIR / home).resolve())
-    workspace = agents.get("workspace", "../Zootopia/homework")
-    agents["workspace"] = str((BASE_DIR / workspace).resolve())
+    home = agents.get("home", "AgentsHome")
+    agents["home"] = str(Path(home) if Path(home).is_absolute() else (base_dir / home).resolve())
+    workspace = agents.get("workspace", "Zootopia/homework")
+    agents["workspace"] = str(Path(workspace) if Path(workspace).is_absolute() else (base_dir / workspace).resolve())
 
     # 每个账号的 owner_open_ids：元素内逗号拆分 + 剔除空串
     feishu = cfg.get("channels", {}).get("feishu", {})
@@ -112,10 +113,32 @@ def _normalize(cfg: dict) -> dict:
             s.strip() for item in ids for s in str(item).split(",") if s.strip()
         ]
 
-    # skills_dir 同样相对 agent.json 解析
-    skills_dir = cfg.get("tools", {}).get("skills_dir", "skills")
-    cfg["tools"]["skills_dir"] = str((BASE_DIR / skills_dir).resolve())
+    # skills_dir / asr.model_dir 同样相对配置文件所在目录解析
+    # 绝对路径直接用
+    tools = cfg.setdefault("tools", {})
+    skills_dir = tools.get("skills_dir", "AgentsHome/skills")
+    tools["skills_dir"] = str(Path(skills_dir) if Path(skills_dir).is_absolute() else (base_dir / skills_dir).resolve())
+    asr = tools.get("asr")
+    if asr and asr.get("model_dir"):
+        md = asr["model_dir"]
+        asr["model_dir"] = str(Path(md) if Path(md).is_absolute() else (base_dir / md).resolve())
     return cfg
+
+
+def _check_file_permissions() -> list[str]:
+    """检查 .env 和 agent.json 等敏感文件的权限是否过宽。"""
+    issues = []
+    for label, path in [(".env", ENV_FILE), ("agent.json", CONFIG_FILE)]:
+        if not path.exists():
+            continue
+        mode = path.stat().st_mode
+        world_readable = mode & 0o004
+        group_readable = mode & 0o040
+        if world_readable:
+            issues.append(f"{label} ({path}) 对所有人可读，建议 chmod 600")
+        elif group_readable:
+            issues.append(f"{label} ({path}) 对同组用户可读，建议 chmod 600")
+    return issues
 
 
 def load() -> dict:
@@ -124,14 +147,39 @@ def load() -> dict:
     if _config is not None:
         return _config
     _load_env()
-    raw = _config_file().read_text(encoding="utf-8")
-    _config = _normalize(_substitute(json.loads(_strip_comments(raw))))
+    cfg_file = _config_file()
+    raw = cfg_file.read_text(encoding="utf-8")
+    plaintext_issues = _check_plaintext_keys(raw)
+    perm_issues = _check_file_permissions()
+    all_issues = plaintext_issues + perm_issues
+    if all_issues:
+        import sys
+        for issue in all_issues:
+            print(f"[config] ⚠️  {issue}", file=sys.stderr)
+    _config = _normalize(_substitute(json.loads(_strip_comments(raw))),
+                         cfg_file.parent)
     return _config
 
 
 def get() -> dict:
     """取配置（未加载则自动加载，evals 等直接 import core 的场景可用）"""
     return load()
+
+
+def _check_plaintext_keys(raw_cfg_text: str) -> list[str]:
+    """检测 agent.json 中是否还有明文 sk- 前缀的 API Key，返回警告列表。
+    只检查 models.*.api_key 字段，且仅在 ${VAR} 未替换的情况下触发。"""
+    issues = []
+    try:
+        raw = json.loads(_strip_comments(raw_cfg_text))
+    except Exception:
+        return issues
+    models = raw.get("models", {})
+    for name, model_cfg in models.items():
+        api_key = model_cfg.get("api_key", "") if isinstance(model_cfg, dict) else ""
+        if api_key and not api_key.startswith("${") and api_key.startswith("sk-"):
+            issues.append(f"models.{name}.api_key 含明文 key（应以 ${{VAR}} 引用环境变量）")
+    return issues
 
 
 def check() -> list[str]:

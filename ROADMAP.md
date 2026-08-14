@@ -13,7 +13,7 @@
 
 ### 2026-07-29：自建运行时 zoogent 诞生 🎂
 
-- 从零写出 agent-runner（~3k 行 Python），当晚部署到 NAS Docker
+- 从零写出 agentRunner（~3k 行 Python），当晚部署到 NAS Docker
 - 初始能力：
   - 9 人格 × 9 飞书机器人矩阵（固定人格账号 + 白名单）
   - 渠道/core/技能/数据四层分离，配置驱动（JSONC + ${VAR}）
@@ -51,13 +51,14 @@
 
 | 优先级 | 事项 | 说明 |
 |---|---|---|
-| P0 | 响应速度优化 | 流式卡片（首字 2-3s 上屏）+ 计时埋点；备用弹药：`kimi-for-coding-highspeed` 高速模型（方案已成形） |
 | P1 | delegate 工具 | 人格间互相调用，让狗管家的"调度中心"人设落地（防循环委派、独立子会话） |
+| P1 | lean 模式观察期 | 跑两周对比数据：memory_list/kb_search 调用率、每轮 tokens（agent.log 有基线）；验证「检索换预装」不掉效果，不行就 prompt.lean=false 回滚 |
 | P1 | 恢复洞察鹰日报 | 搜索通道已就位；恢复前需先修 lark-cli 飞书文档同步 |
+| P2 | shell 沙箱持久化 | workspace 技能已上线（strict 档）；剩：容器里装的第三方工具重启不持久，需改挂载 |
 | P2 | 自学习闭环 | 借鉴 Hermes：agent 完成任务后自动把经验沉淀成可复用技能 |
 | P2 | 白名单收紧 | agent.json 一行开启 + 补齐各账号 owner_open_ids |
-| P3 | prompt 瘦身 | 用埋点数据定位 system prompt 成本，精简注入 |
 | P3 | 快模型路由 | 短消息/闲聊走高速模型，复杂任务留 k3（需观察期） |
+| P3 | 流式卡片重做 | v1 已移除（不稳定、CT鸥 bug）；等飞书 edit API 更成熟后重做 |
 
 ## 更新日志
 
@@ -65,6 +66,19 @@
 
 | 日期 | 更新 | 影响面 |
 |---|---|---|
+| 2026-08-13 | **Token 爆炸修复 + 流式全移除**：① 截断含 tool_calls 的 assistant 消息 reasoning（>200 字符自动截断，节省 60-80% token）② 移除全部流式逻辑（占位卡、StreamCollector、chat_with_streaming 分支），改为同步直接回复 ③ 修复 CT鸥结果被吃 bug（流式 buffer 为空时占位卡永远不更新） | agentRunner/core/engine.py、agentRunner/channels/feishu/channel.py、agent.json |
+| 2026-08-13 | **feishu.py 模块化拆分**：920 行单文件拆为 6 文件包（feishu/__init__.py、_loop_proxy.py、_owner.py、_parser.py、_card.py、channel.py），按事件循环/档案/解析/卡片/主类职责分层；新增 test_feishu_modules.py 53 项单元测试；外部 import 路径完全兼容 | agentRunner/channels/feishu/*、agentRunner/tests/test_feishu_modules.py、agentRunner/tests/runAllTests.py |
+| 2026-08-13 | **L0 必做改进完成**：① API Key 环境变量化、② shell 工具加固（lark-cli 已加入白名单）、③ 凭证文件权限加固、④ SQLite WAL + busy_timeout、⑤ 流式卡片输出（可配置开关）、⑥ 三阶段表情系统（举手→敲键盘→撒花） | agentRunner/core/config.py、agentRunner/core/engine.py、agentRunner/core/models.py、agentRunner/channels/feishu.py→feishu/、agentRunner/skills/workspace.py、agentRunner/skills/knowledge.py、agent.json、agentRunner/.env、.gitignore |
+| 2026-08-07 | agent.json 上移到项目根目录：相对路径改为相对配置文件所在目录解析（home/workspace/skills/asr 模型目录），AGENT_CONFIG 覆盖语义不变 | agent.json、core/config.py、README、DEPLOYMENT |
+| 2026-08-07 | workspace 技能上线：file_list/file_read/file_write/shell 四工具，沙箱钉死在各人格工作区（路径逃逸拦截、元字符拦截、strict 档只读命令白名单）；cto/housekeeper/yingeraicopy/product/marketing 开通；测试到 64 项 | AgentsHome/skills/workspace.py、agent.json、tests/runAllTests.py |
+| 2026-08-07 | 命名统一驼峰化：agent-runner→agentRunner，测试/skills/配置文件全部改驼峰（runAllTests、webSearch.py、feishuDocs.py、userBrief.md、chatAgents.json、errors.md/learnings.md/playbooks.md）；agent.json skills 值、12 个代码/文档文件引用、16 个人格 prompt 引用同步更新；Python 函数名保持 snake_case（PEP8）；59/59 测试通过 | 全仓库 |
+| 2026-08-07 | evals 回归用例重建：身份用例去掉英文 id 关键词、纪律用例给具体材料防反问、housekeeper 危险用例（曾真实创建飞书文档）换无害题；evals.py 新增「a\|b」或语法抗措辞随机性，19 条全绿 | AgentsHome 9 个 evals.md、agentRunner/evals.py |
+| 2026-08-07 | 极简注入版（瘦身第五刀）：每个人格新增 `lean.md`——soul+rules 手工压缩合并（~45%），lean 模式下替代全文注入；身份/职责/原则/纪律/open_id/能力边界全保留，soul.md/rules.md 原文不动（classic 回滚+检索底料）；实测常驻层 2875→1985 字符，较 classic 累计 -70% | AgentsHome 9 个 lean.md、core/personas.py |
+| 2026-08-07 | 本地数据对齐 NAS：本地 AgentsHome 整体替换为 NAS 生产副本（旧版备份 AgentsHome.local.bak），合并回 userBrief.md 与 7 个 rules.md 能力边界；agent.json 改用 NAS 版为底（保留 qwen/deepseek 模型分配），套上 skills 收窄与 prompt.lean，并加入 .gitignore | AgentsHome/、agentRunner/agent.json、.gitignore |
+| 2026-08-07 | 测试到 59 项：新增极简注入版回归（人人格有 lean.md、比原文短、内容真被注入） | tests/runAllTests.py |
+| 2026-08-06 | Prompt 瘦身（渐进式披露）：常驻层四刀——画像摘要化（新增 shared/userBrief.md，全文转 kb_search 按需检索）、共享知识/踩坑记录改检索指针不预装、记忆索引限长（顶层文件+子目录计数）、格式规则压成 5 条禁止清单；实测常驻层 6460→2875 字符（-55%）；`prompt.lean` 双模式可一行配置回滚 classic 全量注入 | core/personas.py、shared/userBrief.md、agent.json |
+| 2026-08-06 | 工具集收敛：agent.json 按人格分配 skills（stock 仅 housekeeper/finance，askme 再减 feishu_docs），7 个受限人格 rules.md 追加能力边界声明（没有的工具如实说没有，不硬编） | agent.json、AgentsHome 7 个 rules.md |
+| 2026-08-06 | 测试到 58 项：新增 lean 双模式对比 / 索引限长 / 精简画像 3 项；e2e 识别模型故障的欠条回复（WARN 不计失败）并自行核销测试欠条 | tests/runAllTests.py |
 | 2026-07-30 | 图文混排支持：post 消息嵌图下载 + 多图视觉输入（最多 3 张） | channels/feishu.py、core/engine.py |
 | 2026-07-30 | 修复欠条死循环：_trim 裁切点可能落在工具调用组中间，孤儿 tool 消息导致会话永久 400；新增 _safe_cut 边界消毒；全盘扫描修复存量毒会话（analyst/finance） | core/memory.py |
 | 2026-07-30 | ASR 稳定性：启动后台预热（464MB 模型加载 ~2 分钟）+ 加载锁防双重加载 | core/asr.py、main.py |
