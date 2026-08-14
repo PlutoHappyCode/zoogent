@@ -42,7 +42,6 @@ from ..base import Channel
 from ._card import (
     add_reaction,
     build_card,
-    patch_card,
     remove_reaction,
     reply_card,
     reply_text,
@@ -206,11 +205,6 @@ class FeishuChannel(Channel):
     def reply_card(self, message_id: str, text: str, title: str = "",
                    chat_id: str = "", meta: dict | None = None) -> None:
         reply_card(self.lark_client, self.account, message_id, text, title,
-                   chat_id, meta, self.card_footer, self.card_buttons)
-
-    def _patch_card(self, message_id: str, text: str, title: str = "",
-                    chat_id: str = "", meta: dict | None = None) -> None:
-        patch_card(self.lark_client, self.account, message_id, text, title,
                    chat_id, meta, self.card_footer, self.card_buttons)
 
     def build_card(self, text: str, title: str = "", chat_id: str = "",

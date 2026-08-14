@@ -42,67 +42,6 @@ log = get_logger("engine")
 
 
 # ===============================================================
-# 流式卡片收集器：累积 token / 触发更新节流
-# ===============================================================
-class StreamCollector:
-    """累积流式 token，记录首字时间，按 token 数 / 时间节流触发更新。
-
-    参数：
-      min_delta       — 最少累积多少字符才触发一次 on_update（防止频繁 API 调用）
-      flush_interval  — 最长多少秒强制触发一次 on_update（即便没到 min_delta）
-      on_update(text) — 节流后的节流回调，供渠道刷新卡片
-      on_done(text)   — 流结束时的最终回调
-    """
-
-    def __init__(self,
-                 min_delta: int = 40,
-                 flush_interval: float = 1.0,
-                 on_update=None,
-                 on_done=None) -> None:
-        self.buffer = ""
-        self.first_token_ts: float | None = None
-        self.last_flush_ts: float = 0.0
-        self.last_flush_len: int = 0
-        self.min_delta = max(1, int(min_delta))
-        self.flush_interval = max(0.1, float(flush_interval))
-        self.on_update = on_update
-        self.on_done = on_done
-
-    def __call__(self, delta: str) -> None:
-        """每收到一段 delta 就调一下"""
-        if not delta:
-            return
-        if self.first_token_ts is None:
-            self.first_token_ts = time.time()
-        self.buffer += delta
-        now = time.time()
-        if (len(self.buffer) - self.last_flush_len >= self.min_delta
-                or now - self.last_flush_ts >= self.flush_interval):
-            self._flush(now)
-
-    def _flush(self, now: float | None = None, force: bool = False) -> None:
-        now = now if now is not None else time.time()
-        if not force and now - self.last_flush_ts < 0.05:
-            return
-        self.last_flush_ts = now
-        self.last_flush_len = len(self.buffer)
-        if self.on_update:
-            try:
-                self.on_update(self.buffer)
-            except Exception as e:
-                log.warning("stream on_update 失败: %s", e)
-
-    def finalize(self) -> str:
-        """强制 flush，记录最终文本"""
-        self._flush(force=True)
-        if self.on_done:
-            try:
-                self.on_done(self.buffer)
-            except Exception as e:
-                log.warning("stream on_done 失败: %s", e)
-        return self.buffer
-
-# ===============================================================
 # 技能加载器
 # ===============================================================
 
@@ -221,48 +160,6 @@ def chat_with_retry(messages: list, tools: list | None = None,
                 return None
             time.sleep(min(2 ** (attempt + 1), 30))
     return None
-
-
-def chat_with_streaming(messages: list, collector: StreamCollector | None = None,
-                        tools: list | None = None,
-                        retries: int = 3,
-                        model_name: str = "default"):
-    """流式调用 chat.completions.create(stream=True)。
-
-    返回 (content_text, usage)。content_text 为最终文本；
-    若提供 StreamCollector，会把每段增量 delta 送入 collector(delta)。
-    失败（全部重试耗尽）返回 (None, None)，由调用方决定是否降级。
-    """
-    kwargs = {"model": model_id(model_name), "messages": messages,
-              "tools": tools if tools is not None else TOOL_SCHEMAS,
-              "stream": True}
-    for attempt in range(retries):
-        try:
-            stream = get_client(model_name).chat.completions.create(**kwargs)
-            content_chunks: list[str] = []
-            usage = None
-            for chunk in stream:
-                # 某些 SDK 在最后一块附带 usage
-                if getattr(chunk, "usage", None):
-                    usage = chunk.usage
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    content_chunks.append(delta)
-                    if collector is not None:
-                        collector(delta)
-            text = "".join(content_chunks)
-            return text, usage
-        except (RateLimitError, APIError) as e:
-            log.warning("stream 调用失败 attempt=%d: %s", attempt + 1, e)
-            if attempt == retries - 1:
-                return None, None
-            time.sleep(min(2 ** (attempt + 1), 15))
-        except Exception as e:  # noqa: BLE001 — 流式过程中的网络错误
-            log.warning("stream 异常 attempt=%d: %s", attempt + 1, e)
-            if attempt == retries - 1:
-                return None, None
-            time.sleep(min(2 ** (attempt + 1), 15))
-    return None, None
 
 
 # ===============================================================

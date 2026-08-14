@@ -128,6 +128,12 @@ def _shared_knowledge() -> str:
     return "\n\n".join(parts)
 
 
+def _shared_capabilities() -> str:
+    """共享能力边界（shared/capabilities.md）"""
+    cap = _read_home_file("shared/capabilities.md")
+    return cap or ""
+
+
 def _prompt_lean() -> bool:
     """system prompt 瘦身模式开关（agent.json → prompt.lean，默认开）。
     关掉即回到全量注入的 classic 版，观察期发现问题可一行配置回滚"""
@@ -194,6 +200,8 @@ def _build_prompt_lean(agent: str) -> str:
 - 碰飞书 API、部署运维、文件格式等没把握的事，先 kb_search("踩坑 " + 关键词)
 - 找历史报告/资料：kb_search；找当前任务的既有方法：kb_search("技能 " + 任务名)
 
+{_shared_capabilities()}
+
 【长期记忆】（索引只列大概，详情用工具读）
 {_memory_index_lean(agent)}
 用 memory_read / memory_search 按需读取；任务进度变化时用 memory_write 更新对应文件。
@@ -212,7 +220,7 @@ def _build_prompt_classic(agent: str) -> str:
     user = _read_home_file("shared/user.md")
     soul = (agent_dir / "soul.md").read_text(encoding="utf-8")
     rules = _read_home_file(f"{agent}/rules.md")
-    shared_errors = _read_home_file("shared/learnings/ERRORS.md")
+    shared_errors = _read_home_file("shared/learnings/errors.md")
     shared_knowledge = _shared_knowledge()
 
     mem_dir = _memory_dir(agent)

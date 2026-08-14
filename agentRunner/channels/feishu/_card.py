@@ -2,7 +2,7 @@
 channels/feishu/_card.py — 卡片构建与消息发送
 =============================================
 
-飞书消息 API 调用的集中封装：发送、回复、patch、表情。
+飞书消息 API 调用的集中封装：发送、回复、表情。
 所有对 lark_client 的直接操作都在这里，方便统一替换和测试。
 """
 
@@ -15,8 +15,6 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBody,
     DeleteMessageReactionRequest,
     Emoji,
-    PatchMessageRequest,
-    PatchMessageRequestBody,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
@@ -101,31 +99,6 @@ def reply_card(lark_client, account: str,
         log.warning("[%s] 卡片回复失败（%s %s），降级为纯文本",
                     account, response.code, response.msg)
         reply_text(lark_client, account, message_id, text)
-
-
-def patch_card(lark_client, account: str,
-               message_id: str, text: str, title: str = "",
-               chat_id: str = "", meta: dict | None = None,
-               card_footer: bool = True,
-               card_buttons: bool = True) -> None:
-    """用 PatchMessage 接口更新已有卡片（流式卡片内部用）。
-    失败只打日志，不打断主流程。"""
-    card = build_card(text, title, chat_id, meta, card_footer, card_buttons)
-    request = (
-        PatchMessageRequest.builder()
-        .message_id(message_id)
-        .request_body(
-            PatchMessageRequestBody.builder()
-            .content(json.dumps(card, ensure_ascii=False))
-            .msg_type("interactive")
-            .build()
-        )
-        .build()
-    )
-    response = lark_client.im.v1.message.patch(request)
-    if not response.success():
-        log.debug("[%s] 卡片 patch 失败: %s %s",
-                  account, response.code, response.msg)
 
 
 def send(lark_client, account: str,

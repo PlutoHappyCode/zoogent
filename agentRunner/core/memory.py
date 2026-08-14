@@ -106,7 +106,7 @@ MEMORY_SCHEMAS = [
     {"type": "function", "function": {
         "name": "memory_read", "description": "读取一个记忆文件的内容",
         "parameters": {"type": "object", "properties": {
-            "filename": {"type": "string", "description": "相对记忆目录的路径，如「进行中.md」「learnings/ERRORS.md」"}},
+            "filename": {"type": "string", "description": "相对记忆目录的路径，如「进行中.md」「learnings/errors.md」"}},
             "required": ["filename"]}}},
     {"type": "function", "function": {
         "name": "memory_write", "description": "写入记忆文件（更新任务看板、记录错误/表扬时使用）",
@@ -166,7 +166,7 @@ def _persona_fingerprint(agent: str) -> tuple:
         shared = agent_dir.parent / "shared"
         if shared.exists():
             files += sorted(shared.glob("*.md"))
-            files.append(shared / "learnings" / "ERRORS.md")
+            files.append(shared / "learnings" / "errors.md")
         files += sorted(_memory_dir(agent).rglob("*.md"))
     except (ValueError, OSError):
         pass
