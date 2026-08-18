@@ -202,6 +202,29 @@ def _session_file(agent: str, chat_id: str) -> Path:
     return SESSIONS_DIR / f"{agent}--{safe}.json"
 
 
+def _sanitize_tool_pairs(messages: list) -> list:
+    """工具配对消毒：assistant 的每个 tool_call 必须有对应 tool 响应。
+    中断/崩溃可能留下缺响应的 tool_call，qwen 宽容但 kimi 严格校验 → 400，
+    缺哪个补哪个占位符，保住上下文不丢（2026-08-18 管家狗 kimi 400 事故）"""
+    out = []
+    for i, m in enumerate(messages):
+        out.append(m)
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        ids = [tc.get("id") for tc in m["tool_calls"] if tc.get("id")]
+        # 后面连续 tool 消息已覆盖的 id 不补
+        covered = set()
+        idx = i + 1
+        while idx < len(messages) and messages[idx].get("role") == "tool":
+            covered.add(messages[idx].get("tool_call_id"))
+            idx += 1
+        for tc_id in ids:
+            if tc_id not in covered:
+                out.append({"role": "tool", "tool_call_id": tc_id,
+                            "content": "（工具响应缺失，已忽略）"})
+    return out
+
+
 def _load_session_file(agent: str, chat_id: str) -> tuple[list, tuple] | None:
     """从磁盘恢复会话。文件不存在/损坏返回 None，不炸主流程"""
     f = _session_file(agent, chat_id)
@@ -213,7 +236,7 @@ def _load_session_file(agent: str, chat_id: str) -> tuple[list, tuple] | None:
         if not isinstance(messages, list) or not messages:
             return None
         fp = tuple(tuple(x) for x in data.get("fp", ()))
-        return messages, fp
+        return _sanitize_tool_pairs(messages), fp
     except (json.JSONDecodeError, OSError):
         return None
 
