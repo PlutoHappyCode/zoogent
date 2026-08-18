@@ -128,7 +128,7 @@ def _normalize(cfg: dict, base_dir: Path) -> dict:
 def _check_file_permissions() -> list[str]:
     """检查 .env 和 agent.json 等敏感文件的权限是否过宽。"""
     issues = []
-    for label, path in [(".env", ENV_FILE), ("agent.json", CONFIG_FILE)]:
+    for label, path in [(".env", ENV_FILE), ("agent.json", _config_file())]:
         if not path.exists():
             continue
         mode = path.stat().st_mode
@@ -188,9 +188,11 @@ def check() -> list[str]:
     逐个告警跳过，但一个可用账号都没有则视为配置缺失。"""
     cfg = load()
     missing = []
-    default_model = cfg.get("models", {}).get("default", {})
+    models = cfg.get("models", {})
+    default_model = models.get("default") or next(
+        (m for n, m in models.items() if n != "embed"), {})
     if not default_model.get("api_key"):
-        missing.append("models.default.api_key（.env 里配置 AGENT_API_KEY）")
+        missing.append("models 兜底模型的 api_key（.env 里配置 AGENT_API_KEY）")
     feishu = cfg.get("channels", {}).get("feishu", {})
     if feishu.get("enabled"):
         usable = [

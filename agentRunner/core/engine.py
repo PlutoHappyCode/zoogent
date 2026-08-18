@@ -149,7 +149,7 @@ write_tools_md()  # 工具全部注册完，生成 AgentsHome/shared/tools.md
 # 模型调用
 # ===============================================================
 def chat_with_retry(messages: list, tools: list | None = None,
-                    retries: int = 6, model_name: str = "default"):
+                    retries: int = 6, model_name: str | None = None):
     kwargs = {"model": model_id(model_name), "messages": messages,
               "tools": tools if tools is not None else TOOL_SCHEMAS}
     for attempt in range(retries):
