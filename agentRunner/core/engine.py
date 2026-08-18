@@ -223,6 +223,8 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
             messages.append({"role": "user", "content": user_input})
         _trim(agent, messages)
         answer = "（处理步骤过多，请换个问法试试）"
+        last_call_sig, repeat_count = None, 0
+        loop_stuck = False
 
         for _ in range(max_steps):
             response = chat_with_retry(messages=messages, tools=tools,
@@ -256,12 +258,33 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                 answer = message.content
                 break
 
-            for tool_call in message.tool_calls:
+            for tc_idx, tool_call in enumerate(message.tool_calls):
                 name = tool_call.function.name
                 try:
                     args = json.loads(tool_call.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                # 熔断：同一工具+同参数反复调，说明模型在死循环空转
+                # （2026-08-18 授权轮询烧 40 万 token 事故）
+                call_sig = f"{name}:{json.dumps(args, sort_keys=True)}"
+                if call_sig == last_call_sig:
+                    repeat_count += 1
+                    if repeat_count >= 2:
+                        log.warning("🛑 [%s:%s] 检测到死循环调用 %s，强制终止",
+                                    agent, chat_id[:6], name)
+                        # 本条及剩余 tool_calls 全部补占位符，否则留下
+                        # 孤儿 tool_call，严格校验的 API（kimi）下轮直接 400
+                        for tc in message.tool_calls[tc_idx:]:
+                            messages.append({
+                                "role": "tool", "tool_call_id": tc.id,
+                                "content": "（检测到重复调用，已熔断，未实际执行）"})
+                        answer = ("我在这个任务上空转了好几圈，先停下了。"
+                                  "请换个说法或直接告诉我下一步怎么做。")
+                        loop_stuck = True
+                        break
+                else:
+                    repeat_count = 0
+                last_call_sig = call_sig
                 log.info("🔧 [%s:%s] %s(%s)", agent, chat_id[:6], name, args)
                 func = TOOL_FUNCTIONS.get(name)
                 try:
@@ -271,6 +294,8 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                 messages.append({"role": "tool",
                                  "tool_call_id": tool_call.id,
                                  "content": str(result)})
+            if loop_stuck:
+                break
 
         # 历史消毒：图片只服务本轮，换成文本占位符，
         # 不然 base64 留在会话里，之后每轮请求都白烧几千 token
