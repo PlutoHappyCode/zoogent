@@ -124,7 +124,7 @@ def _shared_knowledge() -> str:
         if len(text) <= 3000:
             parts.append(text.strip())
         else:
-            parts.append(f"（{p.name}：{len(text)} 字符，内容过长未注入）")
+            parts.append(f"({p.name}: {len(text)} chars, too long, not injected)")
     return "\n\n".join(parts)
 
 
@@ -159,9 +159,9 @@ def _memory_index_lean(agent: str) -> str:
             continue
         n = sum(1 for _ in d.rglob("*.md"))
         if n:
-            sub_dirs.append(f"- {d.name}/（{n} 篇，用 memory_list 查看）")
+            sub_dirs.append(f"- {d.name}/ ({n} files, use memory_list to browse)")
     lines = [f"- {f}" for f in top_files] + sub_dirs
-    return "\n".join(lines) if lines else "（空）"
+    return "\n".join(lines) if lines else "(empty)"
 
 
 def build_system_prompt(agent: str) -> str:
@@ -228,7 +228,7 @@ def _build_prompt_classic(agent: str) -> str:
     mem_files = sorted(p.relative_to(mem_dir).as_posix()
                        for p in mem_dir.rglob("*.md")
                        if not p.relative_to(mem_dir).as_posix().startswith("archive/"))
-    mem_index = "\n".join(f"- {f}" for f in mem_files) if mem_files else "（空）"
+    mem_index = "\n".join(f"- {f}" for f in mem_files) if mem_files else "(empty)"
 
     return f"""[User Profile] (shared)
 {user}

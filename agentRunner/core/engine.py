@@ -211,8 +211,8 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
         pend = pop_pending(agent, chat_id)
         if pend:
             resume_text = pend["text"]
-            user_input = ("（系统：这是之前因模型故障未完成的任务，"
-                          f"请继续完成）\n{pend['text']}")
+            user_input = ("[System: this task was interrupted by a model outage; "
+                          f"please continue and complete it]\n{pend['text']}")
             log.info("📮 [%s] 收到「继续」，重放欠条：%s", agent, resume_text[:30])
 
     try:
@@ -259,7 +259,7 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
             if message.tool_calls and msg_dict.get("content"):
                 reasoning = str(msg_dict["content"])
                 if len(reasoning) > 200:
-                    msg_dict["content"] = reasoning[:200] + "…（推理已省略）"
+                    msg_dict["content"] = reasoning[:200] + "… (reasoning omitted)"
             messages.append(msg_dict)
 
             if not message.tool_calls:
@@ -331,7 +331,7 @@ def run_agent(chat_id: str, user_input: str,
 
 def run_proactive(chat_id: str, instruction: str,
                   agent: str | None = None) -> str:
-    return run_agent(chat_id, f"[系统指令] {instruction}",
+    return run_agent(chat_id, f"[System instruction] {instruction}",
                      agent=agent, account="scheduler")
 
 

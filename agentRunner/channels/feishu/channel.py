@@ -131,11 +131,11 @@ class FeishuChannel(Channel):
         """下载文件 → 提取文本 → 拼成用户输入（文本类直读，pdf 用 pypdf）"""
         data = self._download_resource(message_id, file_key, "file")
         if data is None:
-            return f"（用户发来文件 {file_name}，但下载失败了，请用户重发）"
+            return f"(User sent file {file_name}, but download failed; ask them to resend)"
         if len(data) > FILE_MAX_BYTES:
             mb = len(data) / 1024 / 1024
-            return (f"（用户发来文件 {file_name}（{mb:.1f}MB），"
-                    f"超过 5MB 上限，请让用户拆分或压缩后重发）")
+            return (f"(User sent file {file_name} ({mb:.1f}MB), "
+                    f"over the 5MB limit; ask them to split or compress and resend)")
         suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
         if suffix in TEXT_EXTS:
             content = data.decode("utf-8", errors="replace")[:FILE_TEXT_LIMIT]
@@ -301,8 +301,8 @@ class FeishuChannel(Channel):
                 self.reply_text(message.message_id,
                                 "图片下载失败了，麻烦再发一次 🙏")
                 return
-            text = ("（用户发来一张图片，请看清图片内容后回应；"
-                    "如果上文有用户的具体要求，结合要求处理图片）")
+            text = ("(User sent an image; look at it carefully and respond; "
+                    "if there are specific instructions above, follow them)")
         elif message.message_type == "post":
             blocks = content.get("content", [])
             text = _flatten_post(blocks)
@@ -325,7 +325,7 @@ class FeishuChannel(Channel):
             if not text and not image_b64:
                 return
             if not text:
-                text = "（用户发来图片，请看清图片内容后回应）"
+                text = "(User sent image(s); look at them carefully and respond)"
         elif message.message_type == "audio":
             file_key = content.get("file_key", "")
             log.info("🎤 [%s] 收到语音，转写中……", self.account)
@@ -334,7 +334,7 @@ class FeishuChannel(Channel):
                 self.reply_text(message.message_id,
                                 "语音没听清 😵 再说一次，打字也行 🙏")
                 return
-            text = (f"（用户发来一条语音，转写如下，请按语音内容回应）\n"
+            text = (f"(User sent a voice message, transcript below; respond to its content)\n"
                     f"{voice_text}")
         elif message.message_type == "file":
             file_key = content.get("file_key", "")

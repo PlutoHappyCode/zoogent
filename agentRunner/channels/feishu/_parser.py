@@ -39,9 +39,9 @@ def _flatten_post(blocks) -> str:
             elif tag == "at":
                 parts.append(f"@{el.get('name', '')}")
             elif tag == "img":
-                parts.append("[图片]")
+                parts.append("[image]")
             elif tag == "media":
-                parts.append("（包含视频，暂不支持，请单独描述）")
+                parts.append("(contains a video, not supported; please describe it separately)")
         lines.append("".join(parts))
     return "\n".join(lines).strip()
 
@@ -79,7 +79,7 @@ def _extract_msg_text(msg_type: str, content_str: str) -> str:
             if isinstance(t, dict) and t.get("content"):
                 texts.append(t["content"])
         return "\n".join(texts).strip()
-    return f"（{msg_type} 类型的消息）" if msg_type else ""
+    return f"({msg_type} message)" if msg_type else ""
 
 
 def _card_md(text: str) -> str:
