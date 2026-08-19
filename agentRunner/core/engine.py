@@ -285,7 +285,7 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                         for tc in message.tool_calls[tc_idx:]:
                             messages.append({
                                 "role": "tool", "tool_call_id": tc.id,
-                                "content": "（检测到重复调用，已熔断，未实际执行）"})
+                                "content": "(duplicate call detected, circuit-broken, not executed)"})
                         answer = ("我在这个任务上空转了好几圈，先停下了。"
                                   "请换个说法或直接告诉我下一步怎么做。")
                         loop_stuck = True
@@ -296,9 +296,9 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                 log.info("🔧 [%s:%s] %s(%s)", agent, chat_id[:6], name, args)
                 func = TOOL_FUNCTIONS.get(name)
                 try:
-                    result = func(**args) if func else f"错误：未知工具 {name}"
+                    result = func(**args) if func else f"Error: unknown tool {name}"
                 except TypeError as e:
-                    result = f"参数错误：{e}，请检查后重试"
+                    result = f"Argument error: {e}; fix and retry"
                 messages.append({"role": "tool",
                                  "tool_call_id": tool_call.id,
                                  "content": str(result)})
@@ -311,7 +311,7 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
             if isinstance(m.get("content"), list):
                 texts = [p.get("text", "") for p in m["content"]
                          if p.get("type") == "text"]
-                m["content"] = " ".join(texts) + " [图片已处理]"
+                m["content"] = " ".join(texts) + " [image processed]"
 
     # 会话落盘：重启不丢对话（每轮结束写一次，图片已消毒不占空间）
     save_session(agent, chat_id)

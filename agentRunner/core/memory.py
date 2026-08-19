@@ -56,48 +56,48 @@ def memory_list() -> str:
     files = sorted(p.relative_to(mem_dir).as_posix()
                    for p in mem_dir.rglob("*.md"))
     if not files:
-        return "记忆目录是空的"
-    return f"共 {len(files)} 个记忆文件：\n" + "\n".join(f"- {f}" for f in files)
+        return "Memory directory is empty"
+    return f"{len(files)} memory files:\n" + "\n".join(f"- {f}" for f in files)
 
 
 def memory_read(filename: str) -> str:
     path = _safe_join(filename)
     if path is None:
-        return f"读取失败：{filename} 不是合法的记忆文件路径"
+        return f"Read failed: {filename} is not a valid memory file path"
     if not path.exists():
-        return f"记忆文件 {filename} 不存在，先用 memory_list 查看现有文件"
+        return f"Memory file {filename} not found; use memory_list to see existing files"
     return path.read_text(encoding="utf-8")[:4000]
 
 
 def memory_write(filename: str, content: str, mode: str = "append") -> str:
     if not filename.endswith(".md"):
-        return "保存失败：记忆文件必须是 .md 格式"
+        return "Save failed: memory file must be .md"
     path = _safe_join(filename)
     if path is None:
-        return f"保存失败：{filename} 不是合法路径"
+        return f"Save failed: {filename} is not a valid path"
     path.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         path.write_text(content, encoding="utf-8")
     else:
         with path.open("a", encoding="utf-8") as f:
             f.write(("\n" if path.exists() else "") + content)
-    return f"已{'覆盖' if mode == 'overwrite' else '追加'}写入记忆：{filename}"
+    return f"Memory {'overwritten' if mode == 'overwrite' else 'appended'}: {filename}"
 
 
 def memory_write_batch(writes_json: str) -> str:
-    """批量写入：一次调用写多个记忆文件，省去多轮 API 往返。
-    writes_json 格式：'[{"filename": "进行中.md", "content": "...", "mode": "append"}, ...]'
-    mode 可省略，默认 append"""
+    """Batch write: multiple memory files in one call, saving API round trips.
+    writes_json format: '[{"filename": "进行中.md", "content": "...", "mode": "append"}, ...]'
+    mode optional, defaults to append"""
     try:
         writes = json.loads(writes_json)
         if not isinstance(writes, list) or not writes:
-            raise ValueError("writes_json 必须是非空 JSON 数组")
+            raise ValueError("writes_json must be a non-empty JSON array")
     except (json.JSONDecodeError, ValueError) as e:
-        return f"writes_json 解析失败：{e}"
+        return f"writes_json parse failed: {e}"
     results = []
-    for w in writes[:10]:  # 单次最多 10 个文件，防失控
+    for w in writes[:10]:  # max 10 files per call, safety cap
         if not isinstance(w, dict) or "filename" not in w or "content" not in w:
-            results.append(f"跳过非法条目：{str(w)[:80]}")
+            results.append(f"Skipped invalid entry: {str(w)[:80]}")
             continue
         results.append(memory_write(w["filename"], str(w["content"]),
                                     w.get("mode", "append")))
@@ -115,36 +115,36 @@ def memory_search(keyword: str) -> str:
                 if len(hits) >= 20:
                     break
     if not hits:
-        return f"记忆里没有找到「{keyword}」"
-    return f"找到 {len(hits)} 条相关记忆：\n" + "\n".join(hits)
+        return f"No memory found for '{keyword}'"
+    return f"Found {len(hits)} memories:\n" + "\n".join(hits)
 
 
 MEMORY_SCHEMAS = [
     {"type": "function", "function": {
-        "name": "memory_list", "description": "列出自己长期记忆目录里的所有文件",
+        "name": "memory_list", "description": "List all files in your long-term memory directory",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
-        "name": "memory_read", "description": "读取一个记忆文件的内容",
+        "name": "memory_read", "description": "Read a memory file",
         "parameters": {"type": "object", "properties": {
-            "filename": {"type": "string", "description": "相对记忆目录的路径，如「进行中.md」「learnings/errors.md」"}},
+            "filename": {"type": "string", "description": "Path relative to memory dir, e.g. '进行中.md', 'learnings/errors.md'"}},
             "required": ["filename"]}}},
     {"type": "function", "function": {
-        "name": "memory_write", "description": "写入记忆文件（更新任务看板、记录错误/表扬时使用）",
+        "name": "memory_write", "description": "Write a memory file (task board updates, error/praise records)",
         "parameters": {"type": "object", "properties": {
-            "filename": {"type": "string", "description": "相对记忆目录的 .md 路径"},
-            "content": {"type": "string", "description": "写入内容"},
+            "filename": {"type": "string", "description": ".md path relative to memory dir"},
+            "content": {"type": "string", "description": "Content to write"},
             "mode": {"type": "string", "enum": ["append", "overwrite"],
-                     "description": "append 追加（默认）/ overwrite 覆盖", "default": "append"}},
+                     "description": "append (default) / overwrite", "default": "append"}},
             "required": ["filename", "content"]}}},
     {"type": "function", "function": {
         "name": "memory_write_batch",
-        "description": "批量写入多个记忆文件。要写多个文件时必须用这个（一次调用搞定），禁止连续多次调 memory_write",
+        "description": "Write multiple memory files in one call. MUST use this when writing 2+ files; never chain memory_write calls",
         "parameters": {"type": "object", "properties": {
             "writes_json": {"type": "string", "description":
-                "JSON 数组字符串：[{\"filename\": \"进行中.md\", \"content\": \"...\", \"mode\": \"append\"}, ...]，mode 可省略默认 append"}},
+                "JSON array string: [{\"filename\": \"进行中.md\", \"content\": \"...\", \"mode\": \"append\"}, ...]; mode optional, defaults to append"}},
             "required": ["writes_json"]}}},
     {"type": "function", "function": {
-        "name": "memory_search", "description": "在长期记忆里按关键词全文搜索",
+        "name": "memory_search", "description": "Full-text keyword search in long-term memory",
         "parameters": {"type": "object", "properties": {
             "keyword": {"type": "string"}},
             "required": ["keyword"]}}},
@@ -249,7 +249,7 @@ def _sanitize_tool_pairs(messages: list) -> list:
         for tc_id in ids:
             if tc_id not in covered:
                 out.append({"role": "tool", "tool_call_id": tc_id,
-                            "content": "（工具响应缺失，已忽略）"})
+                            "content": "(tool response missing, ignored)"})
     return out
 
 
@@ -380,10 +380,10 @@ def _summarize(old_summary: str, dropped: list) -> str | None:
             content = content[:100]
         lines.append(f"{role}: {content[:200]}")
     prompt = (
-        f"已有前情提要：{old_summary or '（无）'}\n\n"
-        f"新增对话片段：\n" + "\n".join(lines) + "\n\n"
-        "请把前情提要更新为一段不超过 300 字的中文摘要，保留："
-        "用户偏好、任务进展、关键结论、未完成的约定。只输出摘要本身。"
+        f"Existing summary: {old_summary or '(none)'}\n\n"
+        f"New conversation excerpts:\n" + "\n".join(lines) + "\n\n"
+        "Update the summary to a single Chinese passage under 300 characters, keeping: "
+        "user preferences, task progress, key conclusions, unfinished agreements. Output only the summary."
     )
     try:
         resp = get_client().chat.completions.create(
@@ -433,7 +433,7 @@ def _compress_stale_tool_results(messages: list, keep_rounds: int = 2) -> None:
         if m.get("role") == "tool":
             content = str(m.get("content", ""))
             if len(content) > 200:
-                m["content"] = content[:200] + "…（旧结果已压缩）"
+                m["content"] = content[:200] + "… (stale result compressed)"
 
 
 def _trim(agent: str, messages: list) -> None:
