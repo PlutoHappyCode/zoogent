@@ -17,7 +17,8 @@
 
 **飞书原生交互**
 
-- 卡片回复（标题=人格名，footer=模型/tokens/耗时）、**三阶段表情**（举手→敲键盘→撒花）
+- 卡片回复（标题=人格名，footer=模型/tokens/耗时）、**三阶段表情**（举手→敲键盘→撒花，
+  表情切换后台异步执行，不阻塞回复链路）
 - 尾部编号选项自动渲染成可点按钮
 - 消息类型：文字 / 富文本(post 展平) / **图文混排**(嵌图下载+多图视觉) /
   语音(faster-whisper 本地转写) / 图片(视觉模型) /
@@ -29,10 +30,12 @@
 
 - 注入层（常驻层）：system prompt = 精简画像 + soul + rules + 限长记忆索引，
   lean 模式常驻 ~700 tokens；`prompt.lean: false` 可回滚全量注入的 classic 版
-- 工具层：`memory_list/read/write/search`，沙箱在本人格 memory/，防穿越
+- 工具层：`memory_list/read/write/write_batch/search`（write_batch 一次写多文件，
+  纪律要求攒批写，避免一轮交互 4-5 次 API 往返），沙箱在本人格 memory/，防穿越
 - 语义层：`kb_search` RAG 检索（shared + 全部工作产出 + 本人格记忆，
   BGE-M3 embedding，sqlite 向量库，惰性增量更新，人格隔离）
-- 会话：超长自动摘要（前情提要），每轮落盘重启不丢
+- 会话：超长自动摘要（前情提要），每轮落盘重启不丢；
+  2 轮前的旧 tool 结果自动压缩到 200 字符（占会话 41% 的膨胀源）
 
 **Prompt 瘦身（渐进式披露，2026-08-06 起默认开启）**
 
@@ -45,14 +48,14 @@
   压缩合并，~45%），lean 模式下替代全文注入；soul.md/rules.md
   原文保留（classic 回滚 / 检索底料）
 - 效果：常驻层 ~6500 → ~2000 字符（-70%），测试实测
-- 工具集收敛：agent.json 按人格分配 skills（stock 仅
-  housekeeper/finance），受限人格在 rules.md 声明能力边界，
-  没有的工具如实说没有、不硬编
+- 工具集收敛：agent.json 按人格分配 skills（stock 仅 finance），
+  受限人格在 rules.md 声明能力边界，没有的工具如实说没有、不硬编
 
 **技能（即插即用）**
 
 - `stock` 股票行情/分析
-- `feishu_docs` 飞书云文档/多维表格（lark-cli 后端）
+- `feishu_docs` 飞书云文档/多维表格（lark-cli v2 接口；bot 身份自助授权，
+  遇到权限问题 agent 自动初始化；建文档后自动分享给主人）
 - `web_search` 联网搜索（自建 SearXNG）+ `web_fetch` 抓网页正文
 - `knowledge` RAG 知识库：`kb_search / kb_reindex / kb_status`
   （md/txt/pdf 均可索引，发给人格机器人 PDF 自动存档入库）
@@ -114,6 +117,7 @@ zoogent/                # 项目根目录
 │   └── <agent_id>/     #   每个人格：soul.md rules.md cron.md memory/ inbox/
 │
 ├── Zootopia/homework/<agent_id>/   # 各人格的工作产出目录
+├── Dockerfile          # 镜像固化（lark-cli 版本钉死，重建不回退）
 ├── docs/DEPLOYMENT.md  # 部署与运维（NAS / Docker / SearXNG / lark-cli）
 └── ROADMAP.md          # 演进历程与未来规划
 ```
@@ -139,8 +143,8 @@ zoogent/                # 项目根目录
        │
        ▼
 【第 2 站】后台线程切换表情（channels/feishu/channel.py · _process_with_reaction）
-  ├─ 撕掉「举手」表情
-  └─ 贴上「敲键盘」表情（表示正在处理）
+  ├─ 撕掉「举手」、贴上「敲键盘」：后台线程异步换（最多等 2s，不阻塞）
+  └─ 会话加载时消毒孤儿 tool_calls（缺响应的自动补占位符，防 kimi 严格校验 400）
        │
        ▼
 【第 2 站】引擎接棒（core/engine.py · run_agent_meta）
@@ -167,7 +171,8 @@ zoogent/                # 项目根目录
 【第 4 站】模型主循环（core/engine.py → Kimi k3，最多 20 轮）
   chat_with_retry 把对话发给模型（失败指数退避重试 6 次）
   ├─ 模型说"我要调工具" → engine 按工具名分发执行：
-  │    memory_*  → 本人格 memory/ 沙箱（防路径穿越）
+  │    memory_*  → 本人格 memory/ 沙箱（防路径穿越；
+  │       多文件写入走 memory_write_batch 一次完成，省 API 往返）
   │    kb_search → 语义检索 RAG：
   │       先惰性增量更新 shared/kb.sqlite（扫 mtime，只重建有变化的文件）
   │       → query 调 embedding（bge_m3_embed）→ 余弦 top-k 片段
@@ -177,6 +182,9 @@ zoogent/                # 项目根目录
   │    结果塞回对话 → 再问模型（工具报错也返回说明，不炸循环）
   │    ⚡ Token 优化：含 tool_calls 的 assistant 消息，reasoning 超过 200
   │       字符自动截断，节省 60-80% token 消耗
+  │    ⚡ 熔断：同一工具+同一参数连调 3 次判定死循环，强制终止
+  │    ⚡ 模型兜底不再硬编码 default：优先 default，没有则用第一个非 embed 模型
+  │    ⚡ 计时埋点：每轮 API 记日志（耗时/输入字符/输出 tokens）
   └─ 模型直接回答 → 出循环，进下一站
        │
        ├─【岔路·故障】6 次重试全败 → 记欠条 pending.json
