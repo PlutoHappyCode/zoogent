@@ -152,9 +152,17 @@ def chat_with_retry(messages: list, tools: list | None = None,
                     retries: int = 6, model_name: str | None = None):
     kwargs = {"model": model_id(model_name), "messages": messages,
               "tools": tools if tools is not None else TOOL_SCHEMAS}
+    payload_chars = len(json.dumps(messages, ensure_ascii=False))
     for attempt in range(retries):
+        t0 = time.time()
         try:
-            return get_client(model_name).chat.completions.create(**kwargs)
+            resp = get_client(model_name).chat.completions.create(**kwargs)
+            log.info("⚡ API %s 第%d轮 %.1fs 输入≈%d字符 输出tokens=%s",
+                     kwargs["model"], attempt + 1, time.time() - t0,
+                     payload_chars,
+                     getattr(getattr(resp, "usage", None),
+                             "completion_tokens", "?"))
+            return resp
         except (RateLimitError, APIError):
             if attempt == retries - 1:
                 return None

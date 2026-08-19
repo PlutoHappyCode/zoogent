@@ -243,8 +243,11 @@ class FeishuChannel(Channel):
         except Exception as e:
             answer, meta = f"出错了：{e} 😵", None
         if thinking_reaction:
-            self.remove_reaction(message_id, thinking_reaction)
-            self.add_reaction(message_id, self.reaction_done)
+            # 撒花表情不挡卡片发送：后台换，用户先看到结果
+            threading.Thread(
+                target=lambda: (self.remove_reaction(message_id, thinking_reaction),
+                                self.add_reaction(message_id, self.reaction_done)),
+                daemon=True).start()
 
         self.reply_card(message_id, answer,
                         title=agent_display(agent),
@@ -254,10 +257,17 @@ class FeishuChannel(Channel):
                                message_id: str,
                                image_b64: str | None = None,
                                raise_hand_reaction: str | None = None) -> None:
-        """后台线程入口：撕掉举手→贴敲键盘→跑 Agent。"""
-        if raise_hand_reaction:
-            self.remove_reaction(message_id, raise_hand_reaction)
-        thinking = self.add_reaction(message_id, self.reaction_processing)
+        """后台线程入口：撕掉举手→贴敲键盘→跑 Agent。
+        表情操作本身是飞书 API 往返（每次 ~300ms），放后台线程不阻塞主流程"""
+        def _swap_reactions():
+            if raise_hand_reaction:
+                self.remove_reaction(message_id, raise_hand_reaction)
+            self._thinking_reaction = self.add_reaction(
+                message_id, self.reaction_processing)
+        t = threading.Thread(target=_swap_reactions, daemon=True)
+        t.start()
+        t.join(timeout=2)  # 敲键盘表情最多等 2s，慢了就先跑 agent
+        thinking = getattr(self, "_thinking_reaction", None)
         self.process_and_reply(chat_id, text, message_id, thinking, image_b64)
 
     # -----------------------------------------------------------

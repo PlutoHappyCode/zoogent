@@ -84,6 +84,26 @@ def memory_write(filename: str, content: str, mode: str = "append") -> str:
     return f"已{'覆盖' if mode == 'overwrite' else '追加'}写入记忆：{filename}"
 
 
+def memory_write_batch(writes_json: str) -> str:
+    """批量写入：一次调用写多个记忆文件，省去多轮 API 往返。
+    writes_json 格式：'[{"filename": "进行中.md", "content": "...", "mode": "append"}, ...]'
+    mode 可省略，默认 append"""
+    try:
+        writes = json.loads(writes_json)
+        if not isinstance(writes, list) or not writes:
+            raise ValueError("writes_json 必须是非空 JSON 数组")
+    except (json.JSONDecodeError, ValueError) as e:
+        return f"writes_json 解析失败：{e}"
+    results = []
+    for w in writes[:10]:  # 单次最多 10 个文件，防失控
+        if not isinstance(w, dict) or "filename" not in w or "content" not in w:
+            results.append(f"跳过非法条目：{str(w)[:80]}")
+            continue
+        results.append(memory_write(w["filename"], str(w["content"]),
+                                    w.get("mode", "append")))
+    return "\n".join(results)
+
+
 def memory_search(keyword: str) -> str:
     mem_dir = _current_memory_dir()
     hits = []
@@ -117,6 +137,13 @@ MEMORY_SCHEMAS = [
                      "description": "append 追加（默认）/ overwrite 覆盖", "default": "append"}},
             "required": ["filename", "content"]}}},
     {"type": "function", "function": {
+        "name": "memory_write_batch",
+        "description": "批量写入多个记忆文件。要写多个文件时必须用这个（一次调用搞定），禁止连续多次调 memory_write",
+        "parameters": {"type": "object", "properties": {
+            "writes_json": {"type": "string", "description":
+                "JSON 数组字符串：[{\"filename\": \"进行中.md\", \"content\": \"...\", \"mode\": \"append\"}, ...]，mode 可省略默认 append"}},
+            "required": ["writes_json"]}}},
+    {"type": "function", "function": {
         "name": "memory_search", "description": "在长期记忆里按关键词全文搜索",
         "parameters": {"type": "object", "properties": {
             "keyword": {"type": "string"}},
@@ -127,6 +154,7 @@ MEMORY_FUNCTIONS = {
     "memory_list": memory_list,
     "memory_read": memory_read,
     "memory_write": memory_write,
+    "memory_write_batch": memory_write_batch,
     "memory_search": memory_search,
 }
 
@@ -388,9 +416,30 @@ def _safe_cut(messages: list, cut: int) -> int:
     return cut
 
 
+def _compress_stale_tool_results(messages: list, keep_rounds: int = 2) -> None:
+    """压缩陈旧 tool 结果：除最近 keep_rounds 轮外，超长 tool content
+    截断到 200 字符。模型只需要最新工具结果的全文，旧的看个摘要就够
+    （实测 tool 结果占会话 41%，是 token 膨胀主因之一）"""
+    # 从后往前数 user 消息的边界，确定"最近 N 轮"的起点
+    user_seen = 0
+    cutoff = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            user_seen += 1
+            if user_seen > keep_rounds:
+                cutoff = i + 1
+                break
+    for m in messages[1:cutoff]:  # 不动 messages[0]（system prompt）
+        if m.get("role") == "tool":
+            content = str(m.get("content", ""))
+            if len(content) > 200:
+                m["content"] = content[:200] + "…（旧结果已压缩）"
+
+
 def _trim(agent: str, messages: list) -> None:
     """会话超长时：先把旧对话摘要存档（memory/summary.md），再裁剪。
     替代暴力砍头 —— agent 不会"聊着聊着忘了开头" """
+    _compress_stale_tool_results(messages)
     max_history = _max_history()
     overflow = len(messages) - (max_history + 1)
     if overflow <= 0:
