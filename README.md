@@ -29,7 +29,9 @@
 **记忆体系（三层）**
 
 - 注入层（常驻层）：system prompt = 精简画像 + soul + rules + 限长记忆索引，
-  lean 模式常驻 ~700 tokens；`prompt.lean: false` 可回滚全量注入的 classic 版
+  lean 模式常驻 ~700 tokens；`prompt.lean: false` 可回滚全量注入的 classic 版；
+  **模型可见文字全部英文**（模板/工具描述/工具返回），回复仍强制中文——
+  英文指令 token 更省、遵循度更稳
 - 工具层：`memory_list/read/write/write_batch/search`（write_batch 一次写多文件，
   纪律要求攒批写，避免一轮交互 4-5 次 API 往返），沙箱在本人格 memory/，防穿越
 - 语义层：`kb_search` RAG 检索（shared + 全部工作产出 + 本人格记忆，
