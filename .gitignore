@@ -20,3 +20,7 @@ models/
 # 系统垃圾
 .DS_Store
 ._*
+
+# IDE 状态 / 调试备份（含会话内容，不进 git）
+.trae/
+debug-sessions/

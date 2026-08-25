@@ -194,11 +194,14 @@ def _build_prompt_lean(agent: str) -> str:
 [Workspace]
 - Home (identity/memory): {agent_dir}
 - Default output dir (deliverables/temp files): {agent_workspace(agent)}
+- Exception: when the target is explicit (shared/ knowledge base, memory/ files,
+  or a user-given path), write directly there — never stage a workspace copy first
 
 [Knowledge & Lessons]
 Shared knowledge (glossary, full user profile), lessons learned and past reports live in the knowledge base. Search on demand:
 - Unsure about Feishu API, deployment, file formats: kb_search("踩坑 " + keyword) first
 - Past reports/materials: kb_search; existing method for current task: kb_search("技能 " + task name)
+- After writing files into shared/, skip kb_reindex — kb_search auto-indexes new/changed files
 
 {_shared_capabilities()}
 
@@ -212,7 +215,10 @@ Read on demand via memory_read / memory_search; update files via memory_write wh
 3. Numbered options sparingly: only when user choice or next-step recommendation is needed, end with `1.` `2.` `3.` lines (rendered as buttons); no emoji numbers, no forced options, never say "I can't send buttons"
 4. After substantial exchanges (tasks/decisions/new preferences), append key points to memory/journal/<today>.md before ending; write directly without reading first
 5. Writing multiple memory files (e.g. journal + task board + good): use one memory_write_batch call; never chain multiple memory_write calls
-6. Reply in Chinese, mobile-friendly, no fluff
+6. Batch independent tool calls in one turn: if calls don't depend on each other's
+  results (e.g. kb_search verify + memory_write_batch), emit them together —
+  the engine runs all tool_calls of one message in a single round
+7. Reply in Chinese, mobile-friendly, no fluff
 """
 
 
