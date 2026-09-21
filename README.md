@@ -16,7 +16,7 @@
 | **Prompt 瘦身**<br/>五刀精简 + 轮次优化三刀，典型写文件任务 7 轮 → 3 轮 | **技能即插即用**<br/>stock 财经 · feishu_docs 飞书文档 · web_search 联网 · knowledge RAG · workspace 三区文件操作 · session_io 上下文移植 | **欠条自愈**<br/>模型故障记账 → 哨兵每 120s 自动补发，或说「继续」手动重放 |
 | **声明式定时**<br/>cron.md 写 HH:MM + 指令，[quiet] 静默不打扰 | **并发安全**<br/>会话锁串行同 chat，档案/绑定/欠条读改写全加锁 | **可观测**<br/>每轮 API 日志（耗时/字符/tokens）+ footer 溯源 + 5MB×3 轮转 |
 
-**关键数据**：9 人格 · 10 飞书渠道 · 7 个技能 / 34 个工具 · 自测 185 项 · 语义索引 6773 chunks / 583 文件 · 系统 prompt 常驻 ~2000 字符
+**关键数据**：9 人格 · 9 飞书机器人（+ 1 终端渠道）· 7 个技能 / 34 个工具 · 自测 185 项 · 语义索引 6773 chunks / 583 文件 · 系统 prompt 常驻 ~2000 字符
 
 ---
 
@@ -166,8 +166,10 @@ agent.json `models.<名字>` 加 provider/base_url/api_key/model；某人格想�
 | 宿主机 | 容器内 | 作用 |
 |---|---|---|
 | `~/agent-system` | `/app` | 代码（上传你写的） |
-| SSD `zoogent` | `/data/zoogent` | **活数据**（agent.json + AgentsHome + Zootopia） |
+| SSD `$ZOOGENT` | `/data/zoogent` | **活数据**（agent.json + AgentsHome + Zootopia） |
 | `~/lark-cli-config` | `/root/.lark-cli` | lark-cli 授权 |
+
+⚠️ 右列是**容器内**视角。`/data/zoogent` 只存在于容器里，宿主机上**没有**这个目录——改 agent.json / AgentsHome 要写 `$ZOOGENT` 的真实宿主路径，见下方「NAS 部署铁律」。
 
 NAS `.env` 五个变量指到挂载点（本地 Mac 不写，自动用相对路径）：
 
@@ -187,20 +189,23 @@ ASR_MODEL_DIR=/data/zoogent/models
 3. **建镜像**：`cd ~/agent-system && sudo docker build -t zoogent:latest .`
    （新环境装依赖用 `pip install -r agentRunner/requirements.lock` 钉死版本；`requirements.txt` 只是给人看的直接依赖下限声明）
 4. **启动容器**：`docker run -d --name zoogent --restart always` 挂三个卷
-5. **验证**：`docker logs -f zoogent` 看到 10 条「飞书渠道已启动」
+5. **验证**：`docker logs -f zoogent` 看到 9 条「飞书渠道已启动」+ 收尾一行「✅ 10 个渠道已启动」（9 飞书 + 1 终端）
 
 ### 日常更新 · 三张表
 
-| 改了什么 | 操作 | 要重启？ |
+| 改了什么 | 传到哪里 | 要重启？ |
 |---|---|---|
-| soul / rules / memory / cron.md | 直接改，**热加载** | **不用**，下一条消息生效 |
-| agent.json / .env / 代码 .py | scp 上传 → `docker restart zoogent` | 重启容器（3s） |
+| soul / rules / memory / cron.md | 直接改（数据卷内） | **不用**，热加载，下一条消息生效 |
+| agent.json、`AgentsHome/skills/*.py` | `$ZOOGENT` 数据卷 | 重启容器（3s） |
+| agentRunner 代码 .py、`.env` | `~/agent-system` | 重启容器（3s） |
 | requirements / Dockerfile | `docker build` → restart | 重建镜像（5min+） |
 
 常用运维三行：
 
 ```bash
-scp -r agentRunner <NAS账号>@<NAS地址>:~/agent-system/
+NAS='<NAS账号>@<NAS地址>'          # SSH 走自定义端口，每条命令都要带 -p <端口>
+scp -P <端口> -r agentRunner $NAS:~/agent-system/
+scp -P <端口> agent.json $NAS:$ZOOGENT/agent.json   # 配置落在数据卷，不在 agentRunner
 sudo docker restart zoogent
 sudo docker logs -f zoogent
 ```
@@ -238,7 +243,7 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 
 ---
 
-## 演进与规划
+## 演进
 
 ### 里程碑
 
@@ -251,29 +256,11 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 **2026-07-30 · 工程化 + 两大能力**
 上午：并发锁 + 日志轮转 + 会话落盘 + AGENT_CONFIG SSD；下午：富文本展平 + 引用回复 + 定时任务卡片化；晚上：SearXNG 联网搜索 + RAG 知识库（bge-m3+sqlite，首建 234 文件 / 4195 块）。
 
-### 未来规划
-
-| 优先级 | 事项 | 说明 |
-|---|---|---|
-| P1 | delegate 工具 | 人格间互调，狗管家"调度中心"人设落地（防循环委派 + 独立子会话） |
-| P1 | lean 模式观察期 | 对比 tokens / 工具调用率；效果不佳就 `prompt.lean=false` 回滚 classic |
-| P1 | 恢复洞察鹰日报 | 搜索通道已就绪；需先修 lark-cli 飞书文档同步 |
-| P2 | DSH 结合·一层：dsh_delegate 技能 | DeepSeek Harness 作「重活执行器」：zoogent 人格遇重活（写代码/多步执行/Pay Skill）调 `dsh --profile headless`，结果回飞书并写记忆；人格/记忆/cron 零改动 |
-| P2 | DSH 结合·二层：AgentsHome 插件化 | 开发 dsh 插件 dsh-zoogent-persona（soul/rules 注入 preset）+ dsh-zoogent-memory（memory 工具移植，共用现有数据格式），DSH 直接启动各人格 |
-| P3 | DSH 结合·三层：飞书渠道接 DSH | channel 层经 ACP/Python SDK 转 DSH 会话，engine 主循环退役；等 DSH 出正式版再动（现开发者预览，有破坏性变更） |
-| P2 | shell 沙箱持久化 | 容器里第三方工具重启丢失 → 改挂载 |
-| P2 | 调度器升级 | 持久化队列替代轮询 sleep：cron 表达式、独立线程、退避重试、任务状态可见 |
-| P2 | CI/CD 自动化部署 | GitHub Actions lint+pytest → 镜像/rsync 自动推 NAS，替代手搓 scp |
-| P3 | 技能导入规范 | core 改成真 package，skills 不再依赖运行时 sys.path，支持静态检查 |
-| P3 | RAG 异步索引 | 启动后台预索引 / scheduler 定时重建，免首次搜索卡 |
-| P3 | 欠条多任务 | pending 改列表，支持按序 / 选择核销，Dashboard 可看 |
-| P3 | 快模型路由 | 闲聊走高速模型，复杂任务留 k3（观察期后） |
-| P3 | 流式卡片重做 | 飞书 edit API 更成熟后回归（v1 不稳已移除） |
-
 ### 更新日志（最新在顶）
 
 | 日期 | 更新 | 影响面 |
 |---|---|---|
+| 2026-09-21 | **收尾上线**：① 白名单在生产生效（8 人格锁主人 open_id，askme 刻意 fail-open）② `agent.json` 权限 600（本机 + NAS）③ README 抹除 NAS 登录手机号（仓库是公开的）④ 九修全量部署 NAS 并验收：绑定/会话/memory 零丢失，启动无 Traceback/401 ⑤ 补运维铁律——数据卷真实宿主路径（宿主机 `/data/zoogent` 是空壳）、上传必排 `.env`/`memory/`/`logs/` | NAS agent.json、agentRunner 13 文件、skills/workspace.py、README.md |
 | 2026-09-21 | **健壮性与安全九修**：① 白名单开启（8 人格锁定主人 open_id，askme 面向学生刻意 fail-open）② 状态文件全部原子写（`.tmp` + `os.replace`，杜绝写盘中途被杀留半截 JSON）+ `chatAgents.json` 损坏自动备份改名并回落默认人格 ③ 4xx 不重试不记欠条（`RateLimitError`→`APIStatusError`→`APIError` 顺序），并撤回本轮 user 消息、明确告知「重试也没用」④ `lean.md` 进热加载指纹 + 比 soul/rules 旧 300s 告警（防人格漂移）⑤ workspace 沙箱 `posture` 切 strict，新增参数级校验（`find . -delete`、`cat /etc/passwd` 一律拦）⑥ 配置键正名 `dangerous_allowlist`→`denylist`（旧键兼容）⑦ 工具抛异常兜底为 `Tool error` 串不炸主循环 ⑧ evals 跑完清理 `eval-*` 残留会话 ⑨ 依赖锁 `requirements.lock`（Python 3.11 解析，openai 钉 2.47.0 对齐生产）+ 可移植测试 & GitHub Actions CI | agent.json、core/{models,engine,scheduler,memory,personas}.py、feishu/_owner.py、skills/workspace.py、evals.py、requirements.lock（新）、tests/{runAllTests,runPortableTests}.py、.github/workflows/ci.yml（新） |
 | 2026-09-21 | **会话上下文移植**：① 旁路会话日志（每轮 append JSONL，不受 `_trim` 压缩影响，保住完整原始记录）② 新技能 sessionIO 三工具——`session_scan` 按序号看会话 / `session_export` 按区间提炼「身份背景+领域知识+对齐待办」（distill·raw 双模式，可出飞书云文档）/ `session_import` 吸收 Hermes 导出件落 `shared/domains/` ③ workspace 补 home·shared 三区 + 身份文件写保护 | core/sessionLog.py（新）、skills/sessionIO.py（新）、engine.py、personas.py、workspace.py、agent.json、runAllTests.py |
 | 2026-08-25 | **轮次优化三刀**（7 轮→3 轮）：① 明示目标直接写 shared/memory/指定路径，去掉 4 轮作业区中转冗余 ② 通用并行工具调用——独立工具（kb_search+write_batch）同一轮出 ③ 写入 shared 后免手动 reindex + kb_reindex 改增量 | personas.py（模板 4 处）、8 个 lean.md（规则 4）、knowledge.py |
@@ -313,6 +300,9 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 - agent.json 里所有 `base_url` 要和 key 对应：kimi key → kimi coding 端点，qwen key → aliyun maas 端点，乱配必 401
 - lark-cli 要用 v2 命令格式（`+create --doc-format markdown` / `+update --command append` / `+record-list --json` / `members create --yes`），老格式会炸
 - scheduler job 去重键必须用 hashlib.md5，不能用 Python `hash()`——PYTHONHASHSEED 每次重启变，会重复触发
+- 数据卷的真实宿主路径形如 `/data_n003/data/udata/real/<NAS账号>/zoogent`（极空间把用户数据藏在 `/data_nXXX/data/udata/real/` 下）。⚠️ 宿主机上 `ls /data` 看到的那个 `zoogent` 是空壳，写进去容器一个字都读不到（2026-09-21 实测）
+- 上传 agentRunner **必须排除 `.env` / `memory/` / `logs/`**：本机 `.env` 指向 Mac 相对路径，覆盖过去会让容器内路径全读空（全 401）；`memory/` 是生产会话存档，覆盖即丢历史（2026-09-21 教训）
+- 拿不准挂载关系时直接问内核，别信文档：`docker inspect <容器> --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'`
 
 **Prompt & Token 经验**
 - 给模型看的文字（模板/工具 description/返回串）一律写英文 + 短句：token 省 30-50%，遵循度还更稳；Reply in Chinese 规则留着，用户侧看到的永远中文
