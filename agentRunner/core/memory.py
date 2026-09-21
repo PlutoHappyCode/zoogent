@@ -11,6 +11,7 @@ core/memory.py — 记忆工具 + 会话管理
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -29,14 +30,23 @@ MEMORY_DIR.mkdir(exist_ok=True)
 _local = threading.local()
 
 
-def set_current_agent(agent: str) -> None:
-    """engine 跑主循环前调用：记忆工具靠它知道当前人格"""
+def set_current_agent(agent: str, chat_id: str | None = None) -> None:
+    """engine 跑主循环前调用：记忆工具靠它知道当前人格，
+    会话导出等技能还要靠它知道"当前是哪个会话"（chat_id 可不传，保持旧调用兼容）"""
     _local.agent = agent
+    if chat_id is not None:
+        _local.chat_id = chat_id
 
 
 def current_agent() -> str:
     """当前线程正在服务的人格（飞书技能等需要按人格取凭证时用）"""
     return getattr(_local, "agent", default_agent())
+
+
+def current_chat_id() -> str:
+    """当前线程正在服务的会话 chat_id（会话导出技能用）。
+    不在主循环里（例如直接跑脚本）时返回空串。"""
+    return getattr(_local, "chat_id", "")
 
 
 def _current_memory_dir() -> Path:
@@ -49,6 +59,14 @@ def _safe_join(filename: str) -> Path | None:
     base = _current_memory_dir().resolve()
     target = (base / filename).resolve()
     return target if str(target).startswith(str(base)) else None
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """原子写：先写临时文件再 rename，写盘中途被杀也不会留半截文件。
+    （教训：JSON 状态文件损坏 = 绑定全丢/会话归零，2026-09 加固）"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def memory_list() -> str:
@@ -190,7 +208,8 @@ def _persona_fingerprint(agent: str) -> tuple:
     files: list[Path] = []
     try:
         agent_dir = _agent_dir(agent)
-        files += [agent_dir / "soul.md", agent_dir / "rules.md"]
+        files += [agent_dir / "soul.md", agent_dir / "rules.md",
+                  agent_dir / "lean.md"]  # lean 模式注入的是它，必须进指纹
         shared = agent_dir.parent / "shared"
         if shared.exists():
             files += sorted(shared.glob("*.md"))
@@ -280,10 +299,10 @@ def save_session(agent: str, chat_id: str) -> None:
     try:
         SESSIONS_DIR.mkdir(exist_ok=True)
         fp = _SESSION_FP.get(key, ())
-        _session_file(agent, chat_id).write_text(
+        _atomic_write_text(
+            _session_file(agent, chat_id),
             json.dumps({"messages": messages,
-                        "fp": [list(x) for x in fp]}, ensure_ascii=False),
-            encoding="utf-8")
+                        "fp": [list(x) for x in fp]}, ensure_ascii=False))
     except OSError as e:
         log.warning("[%s] 会话落盘失败：%s", agent, e)
 
@@ -298,9 +317,21 @@ def delete_session(agent: str, chat_id: str) -> None:
 
 
 def _load_bindings() -> dict:
-    if BINDINGS_FILE.exists():
+    if not BINDINGS_FILE.exists():
+        return {}
+    try:
         return json.loads(BINDINGS_FILE.read_text(encoding="utf-8"))
-    return {}
+    except (json.JSONDecodeError, OSError) as e:
+        # 坏文件改名备份而不是覆盖，留作案现场；降级为空绑定，
+        # 后果从"全渠道瘫痪"变成"各 chat 回落默认人格"
+        backup = BINDINGS_FILE.with_name(
+            BINDINGS_FILE.name + f".corrupted-{int(time.time())}")
+        try:
+            BINDINGS_FILE.rename(backup)
+        except OSError:
+            pass
+        log.warning("chatAgents.json 损坏（%s），已备份为 %s，绑定重置", e, backup)
+        return {}
 
 
 # chatAgents.json 的读改写全程一把锁：/agent 切换与消息路由并发时不丢更新
@@ -317,9 +348,8 @@ def set_chat_agent(chat_id: str, agent: str) -> None:
     with _BINDINGS_LOCK:
         bindings = _load_bindings()
         bindings[chat_id] = agent
-        BINDINGS_FILE.write_text(
-            json.dumps(bindings, ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        _atomic_write_text(
+            BINDINGS_FILE, json.dumps(bindings, ensure_ascii=False, indent=2))
 
 
 SUMMARY_PREFIX = "【前情提要】"
@@ -512,9 +542,9 @@ def save_pending(agent: str, chat_id: str, account: str, text: str) -> None:
         tasks.append({"chat_id": chat_id, "account": account,
                       "text": text, "ts": int(time.time())})
         try:
-            _pending_file(agent).write_text(
-                json.dumps(tasks, ensure_ascii=False, indent=2),
-                encoding="utf-8")
+            _atomic_write_text(
+                _pending_file(agent),
+                json.dumps(tasks, ensure_ascii=False, indent=2))
             log.info("📌 [%s] 已记欠条（%s…）：%s", agent, chat_id[:6], text[:30])
         except OSError as e:
             log.warning("[%s] 欠条写入失败：%s", agent, e)
@@ -531,8 +561,8 @@ def pop_pending(agent: str, chat_id: str) -> dict | None:
         try:
             f = _pending_file(agent)
             if keep:
-                f.write_text(json.dumps(keep, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
+                _atomic_write_text(
+                    f, json.dumps(keep, ensure_ascii=False, indent=2))
             else:
                 f.unlink(missing_ok=True)
         except OSError as e:

@@ -117,7 +117,8 @@ flat = _flatten_post([
      {"tag": "media"}],
     [{"tag": "text", "text": "第二段"}],
 ])
-expected_flat = "第一段 链接(https://example.com)@测试用户[图片]（包含视频，暂不支持，请单独描述）\n第二段"
+expected_flat = ("第一段 链接(https://example.com)@测试用户[image]"
+                 "(contains a video, not supported; please describe it separately)\n第二段")
 check("_flatten_post: text/a/at/img+media 展平",
       flat == expected_flat, repr(flat))
 

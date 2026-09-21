@@ -148,13 +148,39 @@ def _suggestion_buttons(chat_id: str,
     }
 
 
+def _fmt_tokens(n: int) -> str:
+    """token 数人性化：1234 → 1.2K，1234567 → 1.2M"""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{n / 1000:.1f}K"
+    return str(n)
+
+
 def _footer_note(meta: dict | None) -> dict | None:
-    """卡片没有原生 footer，用 note 备注元素当页脚：模型 · token · 用时"""
+    """卡片没有原生 footer，用 note 备注元素当页脚。
+    模型名始终保留；轮次/耗时/速度/缓存/输入输出有埋点才展示（老 meta 也兼容）"""
     if not meta:
         return None
+    parts = [meta["model"]]
+    if meta.get("rounds"):
+        parts.append(f"{meta['rounds']}轮·{meta.get('steps', 0)}步")
+    if meta.get("llm_s") is not None:
+        parts.append(f"LLM {meta['llm_s']}s·工具 {meta.get('tool_s', 0)}s")
+    out_tokens = meta.get("out_tokens", 0)
+    llm_s = meta.get("llm_s", 0)
+    if out_tokens and llm_s:
+        parts.append(f"{out_tokens / llm_s:.0f} tok/s")
+    in_tokens = meta.get("in_tokens", 0)
+    cached = meta.get("cached_tokens", 0)
+    if in_tokens and cached:
+        parts.append(f"缓存命中 {cached * 100 // in_tokens}%")
+    if in_tokens or out_tokens:
+        parts.append(f"输入 {_fmt_tokens(in_tokens)}·输出 {_fmt_tokens(out_tokens)} tok")
+    elif meta.get("tokens"):
+        parts.append(f"{meta['tokens']} tokens")
+    parts.append(f"用时 {meta['elapsed']}s")
     return {
         "tag": "note",
-        "elements": [{"tag": "plain_text",
-                      "content": f"{meta['model']} · {meta['tokens']} tokens"
-                                 f" · 用时 {meta['elapsed']}s"}],
+        "elements": [{"tag": "plain_text", "content": " · ".join(parts)}],
     }

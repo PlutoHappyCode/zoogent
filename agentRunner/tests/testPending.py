@@ -58,6 +58,39 @@ session = core.memory.SESSIONS.get(f"{AGENT}:{CHAT}", [])
 check("失败消息已从会话撤回",
       not any(m.get("content") == "查一下今天的日程" for m in session))
 
+# ---- 2.5 4xx（400）：不重试、不记欠条、撤回消息、明确告知 ----
+import httpx  # noqa: E402
+from openai import BadRequestError  # noqa: E402
+
+CHAT4 = CHAT + "_4xx"
+
+
+def _raise_400(**kw):
+    """构造真实的 BadRequestError（openai 2.x 需要 httpx.Response）"""
+    req = httpx.Request("POST", "https://x/v1/chat/completions")
+    resp = httpx.Response(400, request=req, json={"error": {"message": "bad"}})
+    raise BadRequestError("bad request", response=resp, body=None)
+
+
+engine.chat_with_retry = _raise_400
+answer4, meta4 = core.run_agent_meta(CHAT4, "这条请求不合法", agent=AGENT,
+                                     account="terminal")
+engine.chat_with_retry = orig_chat
+
+_p4 = load_pending(AGENT)
+check("4xx 不记欠条、不留待重放",
+      meta4.get("pending") is not True
+      and not any(t.get("chat_id") == CHAT4 for t in _p4),
+      f"pending={meta4.get('pending')} 欠条数={len(_p4)}（仍只留上一节那张）")
+check("4xx 告知用户重试也没用", "重试也没用" in answer4, f"answer={answer4[:24]}…")
+check("4xx 撤回本轮 user 消息",
+      not any(m.get("content") == "这条请求不合法"
+              for m in core.memory.SESSIONS.get(f"{AGENT}:{CHAT4}", [])),
+      f"会话 {len(core.memory.SESSIONS.get(f'{AGENT}:{CHAT4}', []))} 条")
+core.memory.delete_session(AGENT, CHAT4)
+from core.sessionLog import log_file as _log_file  # noqa: E402
+_log_file(AGENT, CHAT4).unlink(missing_ok=True)
+
 # ---- 3. 说「继续」→ 核销欠条并重放原文 ----
 seen_inputs = []
 
@@ -76,7 +109,7 @@ engine.chat_with_retry = orig_chat
 
 check("「继续」核销欠条", load_pending(AGENT) == [])
 check("「继续」重放原始任务",
-      any("查一下今天的日程" in s and "系统" in s for s in seen_inputs),
+      any("查一下今天的日程" in s and "[System:" in s for s in seen_inputs),
       f"实际输入={seen_inputs[-1][:40] if seen_inputs else '无'}…")
 check("「继续」正常作答", answer == "日程已整理好" and not meta.get("pending"))
 
@@ -118,6 +151,36 @@ check("补发后欠条核销", load_pending(AGENT) == [])
 check("哨兵重放不污染会话",
       len([m for m in core.memory.SESSIONS.get(f"{AGENT}:{CHAT}", [])
            if m.get("role") == "user" and "哨兵测试任务" in str(m.get("content"))]) <= 1)
+
+# ---- 5. 单条欠条异常不连坐（坏账在前，好账在后仍要补发） ----
+BAD_AGENT, GOOD_AGENT = "analyst", "housekeeper"  # list_agents() 按字母序，analyst 在前
+BAD_CHAT, GOOD_CHAT = "test_pending_bad", "test_pending_good"
+_orig_meta = engine.run_agent_meta
+
+
+def _flaky_meta(chat_id, text, **kw):
+    if "坏账" in text:
+        raise RuntimeError("模拟单条欠条炸掉")
+    return "兜底补发答案", {"pending": False}
+
+
+try:
+    save_pending(BAD_AGENT, BAD_CHAT, "mock_account", "坏账任务")
+    save_pending(GOOD_AGENT, GOOD_CHAT, "mock_account", "好账任务")
+    engine.run_agent_meta = _flaky_meta
+    sent.clear()
+    time.sleep(1.8)  # 哨兵线程（interval=1s）扫一轮
+    engine.run_agent_meta = _orig_meta
+    good_ok = len(load_pending(GOOD_AGENT)) == 0 and any(
+        GOOD_CHAT == c and "兜底补发答案" in t for c, t in sent)
+    check("单条欠条异常不连坐：坏账留账、好账照常补发",
+          good_ok and len(load_pending(BAD_AGENT)) == 1,
+          f"好账补发={good_ok} 坏账留账={len(load_pending(BAD_AGENT))}")
+finally:
+    engine.run_agent_meta = _orig_meta
+    for _a, _c in ((BAD_AGENT, BAD_CHAT), (GOOD_AGENT, GOOD_CHAT)):
+        pop_pending(_a, _c)
+        core.memory.delete_session(_a, _c)
 
 # ---- 清理测试残留 ----
 pf = Path(core.home()) / AGENT / "memory" / "pending.json"

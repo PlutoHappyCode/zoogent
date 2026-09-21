@@ -21,6 +21,9 @@ import re
 from pathlib import Path
 
 from .config import get
+from .log import get_logger
+
+log = get_logger("personas")
 
 
 def home() -> Path:
@@ -29,12 +32,12 @@ def home() -> Path:
 
 
 def workspace_root() -> Path:
-    """工作区根目录（交付物输出），默认 AgentsHome 同级 Zootopia/homework"""
+    """作业区根目录（交付物输出），默认 AgentsHome 同级 Zootopia/homework"""
     return Path(get()["agents"].get("workspace", "../Zootopia/homework"))
 
 
 def agent_workspace(agent: str) -> Path:
-    """每个 agent 的工作区目录：<workspace_root>/<agent_id>，
+    """每个 agent 的作业区目录：<workspace_root>/<agent_id>，
     可在 agents.members.<id>.workspace 里覆盖；首次访问自动创建"""
     custom = _member_cfg(agent).get("workspace")
     d = Path(custom) if custom else workspace_root() / agent
@@ -86,7 +89,10 @@ def agent_display(agent: str) -> str:
         return f"{emoji_m.group(1)} {name}"
     m = re.search(r"[\U0001F000-\U0001FAFF☀-➿]", name)
     if m:
-        clean = (name[:m.start()] + name[m.end():]).strip()
+        clean = (name[:m.start()] + name[m.end():])
+        # 摘掉 emoji 后常留下变体选择符（如 🕊️ 的 U+FE0F），肉眼不可见但会
+        # 污染展示名（撞上 prompt 里的干净名字时对不上），一并清掉
+        clean = clean.strip().strip("\ufe0e\ufe0f\u200d").strip()
         return f"{m.group(0)} {clean}"
     return f"🤖 {name}"
 
@@ -180,6 +186,15 @@ def _build_prompt_lean(agent: str) -> str:
     lean_md = agent_dir / "lean.md"
     if lean_md.exists():
         identity = lean_md.read_text(encoding="utf-8")
+        # lean.md 是 soul+rules 的手工压缩双写，容易改了一个忘了另一个。
+        # 容忍 300s：同一批编辑通常相隔几秒~几分钟写完，那不是漂移；
+        # 超过才算"改了 soul/rules 但忘了同步 lean"。
+        newer = max(((agent_dir / f).stat().st_mtime
+                     for f in ("soul.md", "rules.md")
+                     if (agent_dir / f).exists()), default=0)
+        if newer and newer - lean_md.stat().st_mtime > 300:
+            log.warning("[%s] lean.md 比 soul/rules 旧，可能存在人格漂移，"
+                        "请同步压缩更新", agent)
     else:
         soul = (agent_dir / "soul.md").read_text(encoding="utf-8")
         rules = _read_home_file(f"{agent}/rules.md")
@@ -191,11 +206,19 @@ def _build_prompt_lean(agent: str) -> str:
 
 {identity}
 
-[Workspace]
-- Home (identity/memory): {agent_dir}
-- Default output dir (deliverables/temp files): {agent_workspace(agent)}
+[Homework] (file_list/file_read/file_write take a `zone` param)
+- homework (default): {agent_workspace(agent)} — deliverables & temp files
+- home: {agent_dir} — your identity & memory home; soul/rules are read-only
+- shared: {home() / "shared"} — team-wide files, all agents read/write
+- Your own schedule lives in home/cron.md: manage it with cron_list/cron_add/cron_remove/cron_update (never via file_write)
+- To touch files outside your homework area or memory subfolder, pass zone="home" or zone="shared"
 - Exception: when the target is explicit (shared/ knowledge base, memory/ files,
-  or a user-given path), write directly there — never stage a workspace copy first
+  or a user-given path), write directly there — never stage a homework-area copy first
+
+[Session Handoff] (only when the owner explicitly asks; never on your own)
+- Exporting this chat: session_scan for turn numbers, then session_export(start/end)
+- Absorbing someone else's export file: session_import — preview and show it to the
+  owner first; only call again with action='apply' after the owner approves
 
 [Knowledge & Lessons]
 Shared knowledge (glossary, full user profile), lessons learned and past reports live in the knowledge base. Search on demand:
@@ -243,9 +266,17 @@ def _build_prompt_classic(agent: str) -> str:
 
 {rules}
 
-[Workspace]
-- Home (identity/memory): {_agent_dir(agent)}
-- Default output dir (deliverables/temp files): {agent_workspace(agent)}
+[Homework] (file_list/file_read/file_write take a `zone` param)
+- homework (default): {agent_workspace(agent)} — deliverables & temp files
+- home: {_agent_dir(agent)} — identity & memory home; soul/rules are read-only
+- shared: {home() / "shared"} — team-wide files, all agents read/write
+- Your own schedule lives in home/cron.md: manage it with cron_list/cron_add/cron_remove/cron_update (never via file_write)
+
+[Session Handoff] (only when the owner explicitly asks; never on your own)
+- Exporting this chat (for another agent or a colleague to pick up): session_scan
+  to see turn numbers, then session_export(start/end) → md+json in your homework
+- Absorbing someone else's export file (e.g. a Hermes session-*.json): session_import
+  — preview first and show it to the owner; only call action='apply' after approval
 
 [Shared Knowledge] (shared/)
 {shared_knowledge}

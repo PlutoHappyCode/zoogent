@@ -2,6 +2,9 @@
 
 > 一个配置驱动的个人 Agent 运行时。9 个人格、9 个独立飞书机器人、
 > 数据与代码完全分离——改人格改记忆不下线，改代码只重启不重建镜像。
+> 白名单已开启：8 个人格锁定主人 open_id；askme（芝士鼠）面向学生公开答疑，刻意 fail-open
+> （已知悉：askme 带 knowledge 技能，陌生人可经 kb_search 检索 shared/ 含 user.md 画像——接受，2026-09-21）。
+> git仓库不可复现，也不是该系统的问题。
 
 ---
 
@@ -10,10 +13,10 @@
 | | | |
 |---|---|---|
 | **人格矩阵**<br/>9 人 × 9 机器人，固定身份/原则/记忆/日程；改文件即生效 | **飞书原生交互**<br/>卡片 + 三阶段表情（举手→敲键盘→撒花）+ 建议按钮 + 图文/语音/文件消息 | **三层记忆**<br/>注入层（常驻 ~700t）+ 工具层（memory_write_batch）+ 语义层（RAG，含归档记忆） |
-| **Prompt 瘦身**<br/>五刀精简 + 轮次优化三刀，典型写文件任务 7 轮 → 3 轮 | **技能即插即用**<br/>stock 财经 · feishu_docs 飞书文档 · web_search 联网 · knowledge RAG · workspace 沙箱文件操作 | **欠条自愈**<br/>模型故障记账 → 哨兵每 120s 自动补发，或说「继续」手动重放 |
+| **Prompt 瘦身**<br/>五刀精简 + 轮次优化三刀，典型写文件任务 7 轮 → 3 轮 | **技能即插即用**<br/>stock 财经 · feishu_docs 飞书文档 · web_search 联网 · knowledge RAG · workspace 三区文件操作 · session_io 上下文移植 | **欠条自愈**<br/>模型故障记账 → 哨兵每 120s 自动补发，或说「继续」手动重放 |
 | **声明式定时**<br/>cron.md 写 HH:MM + 指令，[quiet] 静默不打扰 | **并发安全**<br/>会话锁串行同 chat，档案/绑定/欠条读改写全加锁 | **可观测**<br/>每轮 API 日志（耗时/字符/tokens）+ footer 溯源 + 5MB×3 轮转 |
 
-**关键数据**：9 人格 · 10 飞书渠道 · 自测 133 项 · 语义索引 6498 chunks / 523 文件 · 系统 prompt 常驻 ~2000 字符
+**关键数据**：9 人格 · 10 飞书渠道 · 7 个技能 / 34 个工具 · 自测 185 项 · 语义索引 6773 chunks / 583 文件 · 系统 prompt 常驻 ~2000 字符
 
 ---
 
@@ -24,7 +27,8 @@
 ```bash
 cd agentRunner
 python main.py                   # 启动，同一时刻只能一个实例
-python tests/runAllTests.py    # 64 项离线自测 + feishu 53 + pending 13 + 并发 3
+python tests/runAllTests.py       # 82 项离线自测 + feishu 53 + pending 17 + 并发 3（需真 AgentsHome，缺则自动跳过）
+python tests/runPortableTests.py  # 30 项可移植自测（tempfile 造 fixture，CI 同款）
 ```
 
 **飞书用**
@@ -32,6 +36,7 @@ python tests/runAllTests.py    # 64 项离线自测 + feishu 53 + pending 13 + �
 - `/who` 看当前人格；每个机器人固定一个人格，找对机器人就是换人
 - 模型故障说「继续」手动重放任务
 - 文字结尾写 1. 2. 3. 会自动变成可点按钮
+- 说「把今天从 X 到 Y 的聊天导出一份上下文」→ 它自己翻日志出成品（见下方「会话上下文移植」）
 
 ---
 
@@ -47,7 +52,7 @@ core/        Agent 层：人格/记忆/会话/模型主循环（所有智能在�
 skills/*.py  技能层：每组工具一个 .py，模型自己决定调不调
    ↕
 AgentsHome/  人格层：soul/rules/cron/memory — 纯数据，可整体备份迁移
-Zootopia/    工作区：每个人格的产出落盘位置
+Zootopia/    作业区：每个人格的产出落盘位置
 ```
 
 **三条设计原则**
@@ -62,6 +67,7 @@ Zootopia/    工作区：每个人格的产出落盘位置
 zoogent/
 ├── agent.json                 # 中央配置（NAS 上 AGENT_CONFIG 指向 SSD）
 ├── agentRunner/               # 代码（core 引擎 + channels 渠道 + tests）
+│   └── memory/                #   运行状态：sessions/ 会话存档 + sessionLog/ 旁路日志
 ├── AgentsHome/                # 人格与能力的家（数据）
 │   ├── skills/                #   技能文件（SCHEMAS + FUNCTIONS）
 │   ├── shared/                #   共享：user.md、kb.sqlite、踩坑记录
@@ -90,12 +96,38 @@ zoogent/
 `chat_with_retry` 指数退避 6 次 → 要调工具就执行（memory_write_batch 合并写、kb_search 自动增量 RAG、熔断死循环同参数 3 次、tool reasoning 超 200 字自动截断）→ 直接答复就出循环 → 失败满 6 次记欠条
 
 **⑤ 卡片送达**（channels/feishu）
-图片 base64 换占位符（防以后每轮白烧 token）→ 会话落盘 → 换"撒花"表情 → 飞书卡片 + footer（模型·tokens·用时）
+图片 base64 换占位符（防以后每轮白烧 token）→ 会话落盘 → 追加旁路会话日志 → 换"撒花"表情 → 飞书卡片 + footer（模型·tokens·用时）
 
 ### 两条支线
 
 - **欠条自愈（120s 哨兵）**：扫 pending.json → 重放主线 ②~⑤ → 成功才核销、失败留账下次再试
 - **定时任务（30s 调度器）**：扫所有人格 cron.md → 到点今天没触发过就 run_proactive 走主线 → 专属机器人推送（[quiet] 只执行不打扰）
+
+---
+
+## 会话上下文移植（session_io）
+
+把一段对话变成**可移植的上下文**——给别的 agent 直接吸收，或给人读。
+
+**为什么要旁路日志**：会话历史超 30 条会走摘要（`_trim`），**原始消息被永久丢弃**；磁盘上的
+`sessions/*.json` 只是残本，导不出完整上下文。所以另起一份账：
+
+- **旁路日志**（[core/sessionLog.py](agentRunner/core/sessionLog.py)）：每轮回答结束 append 一行 JSONL 到
+  `agentRunner/memory/sessionLog/<人格>--<会话>.jsonl`，记用户原话 / 工具名+参数+结果预览 / 回答 / 轮次与 token。
+  独立于会话历史，**永不压缩**，也不进 LLM 上下文
+
+**三个工具**（[skills/sessionIO.py](AgentsHome/skills/sessionIO.py)）：
+
+| 工具 | 作用 |
+|---|---|
+| `session_scan` | agent「看见」自己的会话：按序号列 `#96 09:12 [用户] … [工具] … [回复] …` |
+| `session_export` | 取区间 → 提炼「身份背景 / 领域知识 / 对齐待办」三段 + 原文折叠附录，落作业区 md + json；`target=doc` 再出飞书云文档 |
+| `session_import` | 吸收别人的导出件（Hermes 格式），**默认只预览**，`action=apply` 才落 `shared/domains/` |
+
+- **范围怎么说都行**：`#96` / `2026-09-21` / `first`~`last` / 直接说原话片段（「比亚迪毛利率」也找得到）
+- **两种口味**：`distill` 提炼版（默认，给人看/给 agent 吸收）/ `raw` 原文版（留档核对）
+- **触发时机**：agent **只在你明确要求时才导出**，不自作主张；导入必须先预览
+- ⚠️ **隔离**：每个（人格+会话）一份日志，互不可见。跨机器人交接要走「A 导出 → B 导入」
 
 ---
 
@@ -106,6 +138,9 @@ zoogent/
 
 **加技能**
 `AgentsHome/skills/<名字>.py` 定义 `SCHEMAS + FUNCTIONS`，返回字符串不抛异常。只给部分人用：`agents.members.<id>.skills` 填技能名列表。
+
+**加测试**
+`tests/runPortableTests.py` 是 CI 用的可移植套件：tempfile 造最小 AgentsHome（2 人格）跑纯逻辑，干净 clone 即可过；`tests/runAllTests.py` 依赖真人格/真账号，检测不到就自动跳过。
 
 **加模型 / 切换模型**
 agent.json `models.<名字>` 加 provider/base_url/api_key/model；某人格想单独用：`agents.members.<id>.model`。
@@ -150,6 +185,7 @@ ASR_MODEL_DIR=/data/zoogent/models
    `tar czf` agentRunner/AgentsHome/Zootopia → scp NAS
 2. **解压 + 同步数据**到 SSD `$ZOOGENT` → chown
 3. **建镜像**：`cd ~/agent-system && sudo docker build -t zoogent:latest .`
+   （新环境装依赖用 `pip install -r agentRunner/requirements.lock` 钉死版本；`requirements.txt` 只是给人看的直接依赖下限声明）
 4. **启动容器**：`docker run -d --name zoogent --restart always` 挂三个卷
 5. **验证**：`docker logs -f zoogent` 看到 10 条「飞书渠道已启动」
 
@@ -164,7 +200,7 @@ ASR_MODEL_DIR=/data/zoogent/models
 常用运维三行：
 
 ```bash
-scp -r agentRunner 15112331127@192.168.31.52:~/agent-system/
+scp -r agentRunner <NAS账号>@<NAS地址>:~/agent-system/
 sudo docker restart zoogent
 sudo docker logs -f zoogent
 ```
@@ -198,7 +234,7 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 **安全加固**
 - `.env` / `agent.json` 进 `.gitignore`，权限 600
 - API key 统一 `${VAR}` 写 .env，不能明文
-- `workspace` shell 默认 strict 只读白名单，要放宽改 agent.json `tools.workspace.posture`
+- `workspace` shell 默认 strict 只读白名单，要放宽改 agent.json `tools.workspace.posture`；auto 档走 `denylist` 黑名单（旧键 `dangerous_allowlist` 保留兼容读取）
 
 ---
 
@@ -222,8 +258,10 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 | P1 | delegate 工具 | 人格间互调，狗管家"调度中心"人设落地（防循环委派 + 独立子会话） |
 | P1 | lean 模式观察期 | 对比 tokens / 工具调用率；效果不佳就 `prompt.lean=false` 回滚 classic |
 | P1 | 恢复洞察鹰日报 | 搜索通道已就绪；需先修 lark-cli 飞书文档同步 |
+| P2 | DSH 结合·一层：dsh_delegate 技能 | DeepSeek Harness 作「重活执行器」：zoogent 人格遇重活（写代码/多步执行/Pay Skill）调 `dsh --profile headless`，结果回飞书并写记忆；人格/记忆/cron 零改动 |
+| P2 | DSH 结合·二层：AgentsHome 插件化 | 开发 dsh 插件 dsh-zoogent-persona（soul/rules 注入 preset）+ dsh-zoogent-memory（memory 工具移植，共用现有数据格式），DSH 直接启动各人格 |
+| P3 | DSH 结合·三层：飞书渠道接 DSH | channel 层经 ACP/Python SDK 转 DSH 会话，engine 主循环退役；等 DSH 出正式版再动（现开发者预览，有破坏性变更） |
 | P2 | shell 沙箱持久化 | 容器里第三方工具重启丢失 → 改挂载 |
-| P2 | 白名单收紧 | agent.json 一行开启 + 补齐各账号 owner_open_ids |
 | P2 | 调度器升级 | 持久化队列替代轮询 sleep：cron 表达式、独立线程、退避重试、任务状态可见 |
 | P2 | CI/CD 自动化部署 | GitHub Actions lint+pytest → 镜像/rsync 自动推 NAS，替代手搓 scp |
 | P3 | 技能导入规范 | core 改成真 package，skills 不再依赖运行时 sys.path，支持静态检查 |
@@ -236,7 +274,9 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 
 | 日期 | 更新 | 影响面 |
 |---|---|---|
-| 2026-08-25 | **轮次优化三刀**（7 轮→3 轮）：① 明示目标直接写 shared/memory/指定路径，去掉 4 轮工作区中转冗余 ② 通用并行工具调用——独立工具（kb_search+write_batch）同一轮出 ③ 写入 shared 后免手动 reindex + kb_reindex 改增量 | personas.py（模板 4 处）、8 个 lean.md（规则 4）、knowledge.py |
+| 2026-09-21 | **健壮性与安全九修**：① 白名单开启（8 人格锁定主人 open_id，askme 面向学生刻意 fail-open）② 状态文件全部原子写（`.tmp` + `os.replace`，杜绝写盘中途被杀留半截 JSON）+ `chatAgents.json` 损坏自动备份改名并回落默认人格 ③ 4xx 不重试不记欠条（`RateLimitError`→`APIStatusError`→`APIError` 顺序），并撤回本轮 user 消息、明确告知「重试也没用」④ `lean.md` 进热加载指纹 + 比 soul/rules 旧 300s 告警（防人格漂移）⑤ workspace 沙箱 `posture` 切 strict，新增参数级校验（`find . -delete`、`cat /etc/passwd` 一律拦）⑥ 配置键正名 `dangerous_allowlist`→`denylist`（旧键兼容）⑦ 工具抛异常兜底为 `Tool error` 串不炸主循环 ⑧ evals 跑完清理 `eval-*` 残留会话 ⑨ 依赖锁 `requirements.lock`（Python 3.11 解析，openai 钉 2.47.0 对齐生产）+ 可移植测试 & GitHub Actions CI | agent.json、core/{models,engine,scheduler,memory,personas}.py、feishu/_owner.py、skills/workspace.py、evals.py、requirements.lock（新）、tests/{runAllTests,runPortableTests}.py、.github/workflows/ci.yml（新） |
+| 2026-09-21 | **会话上下文移植**：① 旁路会话日志（每轮 append JSONL，不受 `_trim` 压缩影响，保住完整原始记录）② 新技能 sessionIO 三工具——`session_scan` 按序号看会话 / `session_export` 按区间提炼「身份背景+领域知识+对齐待办」（distill·raw 双模式，可出飞书云文档）/ `session_import` 吸收 Hermes 导出件落 `shared/domains/` ③ workspace 补 home·shared 三区 + 身份文件写保护 | core/sessionLog.py（新）、skills/sessionIO.py（新）、engine.py、personas.py、workspace.py、agent.json、runAllTests.py |
+| 2026-08-25 | **轮次优化三刀**（7 轮→3 轮）：① 明示目标直接写 shared/memory/指定路径，去掉 4 轮作业区中转冗余 ② 通用并行工具调用——独立工具（kb_search+write_batch）同一轮出 ③ 写入 shared 后免手动 reindex + kb_reindex 改增量 | personas.py（模板 4 处）、8 个 lean.md（规则 4）、knowledge.py |
 | 2026-08-25 | **RAG 含 archive**：语义索引扩到本人格 memory/archive/，9 人 225 归档文件一次预热，5032→6498 chunks，查询不慢 | knowledge.py |
 | 2026-08-24 | **401 双修复**：① 容器 .env 缺 4 行（AGENT_API_KEY 等）→ key 全空，用主机备份恢复 ② openclaw 抢答同一批 3 个机器人 + 它自己 key 失效 → 间歇性 401 → 停 openclaw + 禁自启；根因见 openclaw 日志 401 invalid_auth | NAS .env、openclaw 容器 |
 | 2026-08-18 | **模型可见文字英文化**：prompt 模板 / 5 个 schema / 工具返回串 / 5 技能 52 处 description + ~84 返回串 → 全精简英文；用户侧（卡片/命令/报错）仍中文；Reply in Chinese 保留 | personas.py、memory.py、engine.py、skills ×5 |
@@ -262,6 +302,9 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 - `streaming.enabled` 必须是 false；流式逻辑已完整移除，打开会炸
 - 三阶段 emoji 有效类型：WAVE（举手）/ Typing（敲键盘）/ PARTY（撒花），RaisingHand 等会被飞书拒 231001
 - 会话超 30 条走摘要进 summary.md，裁切点 _safe_cut 不会切在工具调用组中间
+- ⚠️ `_trim` 压缩会**永久丢弃原始消息**（只留摘要），`sessions/*.json` 是残本；要完整原始记录只能读 `memory/sessionLog/` 旁路日志
+- workspace 三区：`homework`（默认，作业区）/ `home`（身份与记忆，soul·rules·lean·cron·evals 写保护）/ `shared`（团队共享）；`shell` 恒限 homework，strict 档（默认）下 cwd + 参数路径双重校验，`cat /etc/passwd`、`find . -delete` 这类合法命令干坏事一律拦
+- 新增/改技能要同步三处：`agent.json` 各人格 `skills` 白名单、`runAllTests.py` 工具数断言、`shared/tools.md`（启动时自动生成，不用手改）
 - 模型主循环最多 20 轮 tool_call，再多会结束；同工具同参连调 3 次熔断
 
 **NAS 部署铁律**
@@ -275,6 +318,7 @@ bot 身份自助授权（agent.json 里的 app 凭证），状态存在 `/root/.
 - 给模型看的文字（模板/工具 description/返回串）一律写英文 + 短句：token 省 30-50%，遵循度还更稳；Reply in Chinese 规则留着，用户侧看到的永远中文
 - 存长推理的会话文件：`sessions/<agent>--<chat_id>.json`，敏感内容或 401 不要先清 session，先查日志/container 抢答
 - 会话历史里含 tool_calls 的 assistant 消息，reasoning 一律截到 200 字：模型写的那一大段中文推理对下一轮工具调用没价值，但能把一轮 15k tokens 撑爆
+- ⚠️ 绝不往会话 messages 里塞自定义字段（如 `ts`、`kind`）：kimi 严格校验未知字段直接 400。要时间戳/元信息走旁路日志，别污染 messages
 
 **飞书交互经验**
 - 换 emoji 是 5 次 HTTP 请求串行（加举手/去举手/加敲键盘/去敲键盘/加撒花），NAS 慢环境累计几秒钟——所以后台异步换，不阻塞回复主线

@@ -14,6 +14,7 @@ import threading
 
 from core.config import BASE_DIR
 from core.log import get_logger
+from core.memory import _atomic_write_text
 
 log = get_logger("feishu")
 
@@ -32,9 +33,8 @@ def _load_owner() -> dict:
             flat = {k: v for k, v in data.items() if isinstance(v, str)}
             data = {k: v for k, v in data.items() if isinstance(v, dict)}
             data.setdefault("default", {}).update(flat)
-            OWNER_FILE.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8")
+            _atomic_write_text(
+                OWNER_FILE, json.dumps(data, ensure_ascii=False, indent=2))
             log.info("📦 owner.json 已迁移为按账号命名空间格式")
         return data
 
@@ -43,8 +43,8 @@ def _save_owner(account: str, open_id: str, chat_id: str) -> None:
     with _OWNER_LOCK:
         data = _load_owner()
         data.setdefault(account, {})[open_id] = chat_id
-        OWNER_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+        _atomic_write_text(
+            OWNER_FILE, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def get_target_chat(account: str) -> str | None:

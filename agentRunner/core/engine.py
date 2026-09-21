@@ -18,7 +18,7 @@ import re
 import time
 from pathlib import Path
 
-from openai import APIError, RateLimitError
+from openai import APIError, APIStatusError, RateLimitError
 
 from .config import BASE_DIR, get
 from .log import get_logger
@@ -37,6 +37,7 @@ from .memory import (
 )
 from .models import agent_model_name, get_client, model_id
 from .personas import agent_display, agent_skills, home, list_agents
+from .sessionLog import log_turn
 
 log = get_logger("engine")
 
@@ -150,6 +151,11 @@ write_tools_md()  # 工具全部注册完，生成 AgentsHome/shared/tools.md
 # ===============================================================
 def chat_with_retry(messages: list, tools: list | None = None,
                     retries: int = 6, model_name: str | None = None):
+    """带退避重试的模型调用。
+
+    429 限流、连接错误、5xx 会重试；重试耗尽返回 None（主循环记欠条）。
+    4xx（除 429，如 400/401）请求本身有问题，重试无意义 —— **会上抛**
+    APIStatusError，由主循环接住并向用户交代，绝不能变成永久欠条。"""
     kwargs = {"model": model_id(model_name), "messages": messages,
               "tools": tools if tools is not None else TOOL_SCHEMAS}
     payload_chars = len(json.dumps(messages, ensure_ascii=False))
@@ -163,10 +169,18 @@ def chat_with_retry(messages: list, tools: list | None = None,
                      getattr(getattr(resp, "usage", None),
                              "completion_tokens", "?"))
             return resp
-        except (RateLimitError, APIError):
-            if attempt == retries - 1:
-                return None
-            time.sleep(min(2 ** (attempt + 1), 30))
+        except RateLimitError:
+            pass  # 429 限流：可重试
+        except APIStatusError as e:
+            if 400 <= e.status_code < 500:
+                # 4xx（除 429）：请求本身有问题，重试无意义，直接上抛，
+                # 由主循环决定怎么跟用户交代——不能记欠条进哨兵死循环
+                raise
+        except APIError:
+            pass  # 连接错误 / 5xx 等：可重试
+        if attempt == retries - 1:
+            return None
+        time.sleep(min(2 ** (attempt + 1), 30))
     return None
 
 
@@ -191,7 +205,7 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                     account: str, max_steps: int | None,
                     image_b64: str | None) -> tuple[str, dict]:
     """主循环本体（调用方已持有该会话锁）"""
-    set_current_agent(agent)  # 记忆工具靠它知道当前人格
+    set_current_agent(agent, chat_id)  # 记忆/会话导出工具靠它知道当前人格与会话
     model_name = agent_model_name(agent)
 
     if max_steps is None:
@@ -204,6 +218,19 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
     t0 = time.time()
     total_tokens = 0
     pending_saved = False
+    # 旁路会话日志：本轮的原始输入 + 工具调用明细，供 session_scan/session_export 用。
+    # 独立于会话历史，不受 _trim 裁剪影响，也不进 LLM 上下文。
+    tool_events: list[dict] = []
+    log_user = f"{user_input} [图片]" if image_b64 else user_input
+    log_source = "system" if user_input.strip().startswith("[System") else "user"
+    # 页脚埋点：轮次/步数、LLM 与工具耗时、输入输出与缓存 tokens
+    rounds = 0
+    tool_calls_count = 0
+    llm_time = 0.0
+    tool_time = 0.0
+    in_tokens = 0
+    out_tokens = 0
+    cached_tokens = 0
 
     # 「继续」→ 核销欠条，重放原始任务
     resume_text = None
@@ -235,8 +262,25 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
         loop_stuck = False
 
         for _ in range(max_steps):
-            response = chat_with_retry(messages=messages, tools=tools,
-                                       model_name=model_name)
+            rounds += 1
+            t_llm = time.time()
+            try:
+                response = chat_with_retry(messages=messages, tools=tools,
+                                           model_name=model_name)
+            except APIStatusError as e:
+                # 4xx：不记欠条、不留待重放；撤回本轮 user 消息保持会话干净
+                if messages and messages[-1].get("role") == "user":
+                    messages.pop()
+                log.warning("⚡ [%s:%s] API %d 拒绝请求：%s",
+                            agent, chat_id[:6], e.status_code, e.message)
+                hint = ("像是 API key 配置问题，麻烦管理员检查一下。"
+                        if e.status_code == 401 else
+                        "请换个说法再试；如果反复出现，可能需要管理员检查配置。")
+                answer = (f"这次请求被模型服务拒绝了（HTTP {e.status_code}），"
+                          f"重试也没用。{hint}")
+                break
+            finally:
+                llm_time += time.time() - t_llm
             if response is None:
                 # 模型持续不可用：把任务记成欠条，恢复后哨兵自动补发
                 save_pending(agent, chat_id, account,
@@ -250,7 +294,15 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                           "恢复后我会自动补发；你也可以稍后对我说「继续」。")
                 break
             if getattr(response, "usage", None):
-                total_tokens += response.usage.total_tokens or 0
+                u = response.usage
+                total_tokens += u.total_tokens or 0
+                in_tokens += getattr(u, "prompt_tokens", 0) or 0
+                out_tokens += getattr(u, "completion_tokens", 0) or 0
+                # 缓存命中 tokens：OpenAI 系在 prompt_tokens_details.cached_tokens，
+                # DeepSeek 系在 prompt_cache_hit_tokens，两家都兼容
+                details = getattr(u, "prompt_tokens_details", None)
+                cached_tokens += (getattr(details, "cached_tokens", 0) or 0) \
+                    or (getattr(u, "prompt_cache_hit_tokens", 0) or 0)
             message = response.choices[0].message
 
             # 截断含 tool_calls 的 assistant 消息内容，节省 token。
@@ -295,10 +347,20 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
                 last_call_sig = call_sig
                 log.info("🔧 [%s:%s] %s(%s)", agent, chat_id[:6], name, args)
                 func = TOOL_FUNCTIONS.get(name)
+                tool_calls_count += 1
+                t_tool = time.time()
                 try:
                     result = func(**args) if func else f"Error: unknown tool {name}"
                 except TypeError as e:
                     result = f"Argument error: {e}; fix and retry"
+                except Exception as e:
+                    # 工具边界兜底：技能约定"返回字符串不抛异常"，但个别技能有裸 IO
+                    # （cron.py 磁盘读写、stock.py json.loads），漏网异常不该炸掉整轮
+                    log.warning("🔧 [%s:%s] 工具 %s 抛出未捕获异常：%s",
+                                agent, chat_id[:6], name, e)
+                    result = f"Tool error: {type(e).__name__}: {e}"
+                tool_time += time.time() - t_tool
+                tool_events.append({"name": name, "args": args, "result": result})
                 messages.append({"role": "tool",
                                  "tool_call_id": tool_call.id,
                                  "content": str(result)})
@@ -317,7 +379,13 @@ def _run_agent_meta(chat_id: str, user_input: str, agent: str,
     save_session(agent, chat_id)
 
     meta = {"model": model_id(model_name), "tokens": total_tokens,
-            "elapsed": round(time.time() - t0, 1), "pending": pending_saved}
+            "elapsed": round(time.time() - t0, 1), "pending": pending_saved,
+            "rounds": rounds, "steps": tool_calls_count,
+            "llm_s": round(llm_time, 1), "tool_s": round(tool_time, 1),
+            "in_tokens": in_tokens, "out_tokens": out_tokens,
+            "cached_tokens": cached_tokens}
+    log_turn(agent, chat_id, log_user, answer, tool_events, meta,
+             source=log_source)
     return answer, meta
 
 

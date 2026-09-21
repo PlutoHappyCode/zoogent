@@ -20,6 +20,7 @@ import re
 import sys
 
 from core import home, list_agents, run_agent
+from core.memory import delete_session
 
 HOME = home()
 
@@ -52,7 +53,12 @@ def run_evals(agent: str) -> tuple[int, int]:
     passed = 0
     for i, case in enumerate(cases):
         # 每条用例独立会话（chat_id 用 eval 前缀，和真实会话隔离）
-        answer = run_agent(f"eval-{agent}-{i}-{time_salt()}", case["q"], agent=agent)
+        chat_id = f"eval-{agent}-{i}-{time_salt()}"
+        try:
+            answer = run_agent(chat_id, case["q"], agent=agent)
+        finally:
+            # 跑完即删：eval-* 会话不该留在内存，也不该在 memory/sessions/ 堆垃圾
+            delete_session(agent, chat_id)
         # 关键词支持「a|b」或语法：命中任一即算通过（模型措辞有随机性）
         missing = [k for k in case["keywords"]
                    if not any(alt in answer for alt in k.split("|"))]

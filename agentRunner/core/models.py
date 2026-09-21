@@ -43,7 +43,8 @@ def get_client(name: str | None = None) -> OpenAI:
     name = name or default_model_name()
     if name not in _clients:
         cfg = model_config(name)
-        _clients[name] = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+        _clients[name] = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"],
+                                timeout=120)
     return _clients[name]
 
 

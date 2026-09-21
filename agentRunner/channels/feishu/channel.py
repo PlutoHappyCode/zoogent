@@ -17,6 +17,7 @@ import base64
 import json
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import lark_oapi as lark
@@ -60,6 +61,29 @@ from ._parser import (
 )
 
 log = get_logger("feishu")
+
+# 消息级幂等：飞书 P2 是「至少一次」投递，回执超时/网络抖动会把同一条
+# message_id 重推 2~3 次。用带 TTL 的去重表挡住，避免「一条消息回复多次」。
+_SEEN_TTL = 300          # 秒：容忍窗口
+_SEEN_MAX = 2000         # 去重表容量上限，满了整体清空
+_seen_messages: dict = {}
+_seen_lock = threading.Lock()
+
+
+def _already_handled(message_id: str) -> bool:
+    now = time.time()
+    with _seen_lock:
+        if len(_seen_messages) >= _SEEN_MAX:
+            _seen_messages.clear()
+        else:
+            stale = [k for k, ts in _seen_messages.items()
+                     if now - ts > _SEEN_TTL]
+            for k in stale:
+                del _seen_messages[k]
+        if message_id in _seen_messages:
+            return True
+        _seen_messages[message_id] = now
+        return False
 
 
 class FeishuChannel(Channel):
@@ -277,6 +301,19 @@ class FeishuChannel(Channel):
         message = data.event.message
         sender_open_id = data.event.sender.sender_id.open_id
 
+        if _already_handled(message.message_id):
+            log.info("🚫 [%s] 重复消息已跳过（message_id: %s）",
+                     self.account, message.message_id)
+            return
+
+        # 处理过程吞掉所有异常，保证 SDK 能正常回执、不触发飞书重投放大重复
+        try:
+            self._handle_message(message, sender_open_id)
+        except Exception:
+            log.exception("[%s] 消息处理异常（已吞掉，避免 SDK 不回执导致重投）",
+                          self.account)
+
+    def _handle_message(self, message, sender_open_id: str) -> None:
         if (self.whitelist and self.owner_open_ids
                 and sender_open_id not in self.owner_open_ids):
             log.info("🚫 [%s] 非主人消息已拦截（open_id: %s）",

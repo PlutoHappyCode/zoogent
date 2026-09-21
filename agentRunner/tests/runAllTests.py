@@ -50,6 +50,22 @@ print("\n===== 1. 配置层 =====")
 import core.config as config  # noqa: E402
 
 cfg = config.load()
+
+# ---------------------------------------------------------------
+# 私有数据守卫：本文件依赖真 AgentsHome（真飞书账号 / 真 9 人格 / 真 RAG 库）。
+# 干净 clone 或 CI 上这些都不存在，直接跑必然一片红——那是环境问题，不是代码问题。
+# 检测不到完整数据就打印提示并 exit 0；纯逻辑用例请跑 tests/runPortableTests.py。
+# ---------------------------------------------------------------
+_home = Path(cfg["agents"]["home"])
+_skills = Path(cfg["tools"]["skills_dir"])
+_personas = [d for d in _home.iterdir() if (d / "soul.md").exists()] if _home.is_dir() else []
+if len(_personas) < 8 or not list(_skills.glob("*.py")):
+    print("⏭️  跳过 runAllTests：未检测到完整私有数据，无法跑本套用例。")
+    print(f"    agents.home = {_home}（{len(_personas)} 个人格，需 ≥8）")
+    print(f"    skills_dir  = {_skills}（需含技能 .py）")
+    print("    只想验证纯逻辑（CI / 干净环境）：python tests/runPortableTests.py")
+    sys.exit(0)
+
 check("配置 load() 成功", isinstance(cfg, dict) and "models" in cfg)
 
 api_key = cfg["models"]["default"].get("api_key", "")
@@ -112,10 +128,11 @@ finally:
 print("\n===== 2. 人格层 =====")
 LEAN = cfg.get("prompt", {}).get("lean", True)
 PROMPT_MARKS = (
-    ["【用户画像·简版】", "【工作区】", "【知识与踩坑】", "【长期记忆】", "【纪律（禁止清单）】"]
+    ["[User Profile · Brief]", "[Homework]", "[Knowledge & Lessons]",
+     "[Long-term Memory]", "[Rules]"]
     if LEAN else
-    ["示例用户", "【工作区】", "【全队共享知识库】",
-     "【全队共享踩坑记录】", "【长期记忆索引】", "【通用纪律】"])
+    ["[User Profile] (shared)", "[Homework]", "[Shared Knowledge] (shared/)",
+     "[Shared Lessons]", "[Long-term Memory Index]", "[Rules]"])
 
 prompt_fail = []
 for agent in disk_agents:
@@ -166,9 +183,9 @@ try:
     p_classic = personas.build_system_prompt("finance")
     check("prompt.lean 切换：瘦身版更短、不注入全量踩坑、带 kb_search 指针",
           len(p_lean) < len(p_classic)
-          and "【知识与踩坑】" in p_lean and "kb_search" in p_lean
-          and "【全队共享踩坑记录】" in p_classic
-          and "【全队共享踩坑记录】" not in p_lean,
+          and "[Knowledge & Lessons]" in p_lean and "kb_search" in p_lean
+          and "[Shared Lessons]" in p_classic
+          and "[Shared Lessons]" not in p_lean,
           f"lean={len(p_lean)} 字符 vs classic={len(p_classic)} 字符"
           f"（省 {len(p_classic) - len(p_lean)}）")
 finally:
@@ -180,7 +197,7 @@ _tmp_jr.write_text("索引限长测试", encoding="utf-8")
 try:
     idx = personas._memory_index_lean("finance")
     check("记忆索引限长：子目录折叠为计数、不逐文件列出",
-          "journal/（" in idx and "篇，用 memory_list 查看" in idx
+          "journal/ (" in idx and "files, use memory_list to browse" in idx
           and "autotest_lean_idx" not in idx,
           f"共 {len(idx.splitlines())} 行")
 finally:
@@ -226,20 +243,22 @@ try:
     s = memory.memory_search(TEST_KW)
     l = memory.memory_list()
     check("finance 记忆写/读/搜/列 一致",
-          "已覆盖写入" in w and TEST_KW in r and TEST_KW in s and TEST_FILE in l,
+          "Memory overwritten" in w and TEST_KW in r and TEST_KW in s
+          and TEST_FILE in l,
           f"文件写入 {test_file_path.name}")
 
     trav1 = memory.memory_read("../finance/memory/good.md")
     trav2 = memory.memory_read("/etc/passwd")
     trav3 = memory.memory_write("../evil.md", "x")
     check("路径穿越防护（../ 与绝对路径均被拒绝）",
-          "读取失败" in trav1 and "读取失败" in trav2 and "保存失败" in trav3,
+          "Read failed" in trav1 and "Read failed" in trav2
+          and "Save failed" in trav3,
           f"read(../)→{trav1[:12]}… read(/abs)→{trav2[:12]}… write(../)→{trav3[:12]}…")
 
     memory.set_current_agent("cto")
     cross = memory.memory_read(TEST_FILE)
     check("人格隔离：cto 读不到 finance 的测试文件",
-          "不存在" in cross, cross[:24])
+          "not found" in cross, cross[:24])
 finally:
     memory.set_current_agent(cfg["agents"].get("default", "housekeeper"))
     if test_file_path.exists():
@@ -266,6 +285,21 @@ finally:
         BINDINGS.unlink()
     check("chatAgents.json 测试绑定已清理",
           TEST_CHAT not in memory._load_bindings(), "文件已还原")
+
+# 绑定文件损坏兜底：坏 JSON 不炸、自动改名备份、回落默认人格
+_corrupt_backup = BINDINGS.read_text(encoding="utf-8") if BINDINGS.exists() else None
+try:
+    BINDINGS.write_text("{ 这不是合法 JSON", encoding="utf-8")
+    _corrupt = memory.get_chat_agent("任意chat")
+    _bak = sorted(BINDINGS.parent.glob(BINDINGS.name + ".corrupted-*"))
+    check("chatAgents.json 损坏兜底：不抛异常 + 回落默认人格 + 坏文件被备份",
+          _corrupt == memory.default_agent() and not BINDINGS.exists() and _bak,
+          f"回落={_corrupt}，备份={_bak[0].name if _bak else '无'}")
+finally:
+    for _b in BINDINGS.parent.glob(BINDINGS.name + ".corrupted-*"):
+        _b.unlink(missing_ok=True)
+    if _corrupt_backup is not None:
+        BINDINGS.write_text(_corrupt_backup, encoding="utf-8")
 
 summary_file = personas.home() / "finance" / "memory" / "summary.md"
 summary_preexisted = summary_file.exists()
@@ -303,6 +337,39 @@ c2 = memory._safe_cut(_msgs, 5)   # 落在完整配对的 assistant 上 → 保�
 check("_safe_cut：孤儿 tool 跳过整组、完整工具组保留",
       c1 == 8 and c2 == 5, f"c1={c1} c2={c2}")
 
+# 热加载指纹必须含 lean.md：lean 模式注入的就是它，漏了则改 lean.md 不生效
+_fp_before = memory._persona_fingerprint("housekeeper")
+check("热加载指纹包含 lean.md（lean 模式注入的就是它）",
+      any(str(p).endswith("lean.md") for p, _ in _fp_before),
+      f"指纹 {len(_fp_before)} 个文件")
+_lean_f = personas.home() / "housekeeper" / "lean.md"
+_lean_mtime = _lean_f.stat().st_mtime
+try:
+    os.utime(_lean_f, (_lean_mtime + 10, _lean_mtime + 10))
+    check("单独改 lean.md 会改变指纹（触发热加载）",
+          memory._persona_fingerprint("housekeeper") != _fp_before, "mtime +10s")
+finally:
+    os.utime(_lean_f, (_lean_mtime, _lean_mtime))
+    check("lean.md mtime 已还原",
+          memory._persona_fingerprint("housekeeper") == _fp_before, "指纹复原")
+
+# 漂移警告：同批编辑的秒级差不吵人，明显过期（>300s）才告警
+_warns: list = []
+_orig_warn = personas.log.warning
+try:
+    personas.log.warning = lambda *a, **k: _warns.append(a[0])
+    personas._build_prompt_lean("housekeeper")
+    _no_warn = not any("漂移" in str(m) for m in _warns)
+    _warns.clear()
+    os.utime(_lean_f, (_lean_mtime - 10000, _lean_mtime - 10000))
+    personas._build_prompt_lean("housekeeper")
+    _has_warn = any("漂移" in str(m) for m in _warns)
+finally:
+    os.utime(_lean_f, (_lean_mtime, _lean_mtime))
+    personas.log.warning = _orig_warn
+check("lean.md 漂移警告：秒级差静默、明显过期告警",
+      _no_warn and _has_warn, f"静默={_no_warn} 告警={_has_warn}")
+
 # 会话落盘：写盘 → 清内存 → 从磁盘恢复，内容一致；重启后指纹变了能热加载
 PERSIST_CHAT = "autotest-persist"
 try:
@@ -337,14 +404,17 @@ mem_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "memory")
 web_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "webSearch")
 kb_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "knowledge")
 ws_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "workspace")
-check("TOOL_SCHEMAS 共 24 个（stock6+feishu5+memory4+web2+kb3+ws4）",
-      len(tool_names) == 24 and len(stock_tools) == 6
-      and len(feishu_tools) == 5 and len(mem_tools) == 4
+cron_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "cron")
+sio_tools = sorted(n for n, o in engine.TOOL_ORIGIN.items() if o == "sessionIO")
+check("TOOL_SCHEMAS 共 34 个（stock6+feishu7+memory5+web2+kb3+ws4+cron4+sio3）",
+      len(tool_names) == 34 and len(stock_tools) == 6
+      and len(feishu_tools) == 7 and len(mem_tools) == 5
       and len(web_tools) == 2 and len(kb_tools) == 3
-      and len(ws_tools) == 4,
+      and len(ws_tools) == 4 and len(cron_tools) == 4
+      and len(sio_tools) == 3,
       f"stock={len(stock_tools)} feishu={len(feishu_tools)} "
       f"memory={len(mem_tools)} web={len(web_tools)} kb={len(kb_tools)} "
-      f"ws={len(ws_tools)}")
+      f"ws={len(ws_tools)} cron={len(cron_tools)} sio={len(sio_tools)}")
 check("TOOL_ORIGIN 溯源正确（无未标注工具）",
       all(n in engine.TOOL_ORIGIN for n in tool_names),
       f"来源：{sorted(set(engine.TOOL_ORIGIN.values()))}")
@@ -412,7 +482,7 @@ try:
     check("web_search 解析结果 + web_fetch 去标签 + 异常降级",
           "标题一" in sr and "https://a.com" in sr
           and "大标题" in fr and "<h1>" not in fr and "script" not in fr
-          and er.startswith("搜索失败"),
+          and er.startswith("Search failed"),
           f"search={sr[:20]!r} fetch={fr[:15]!r} err={er[:12]!r}")
 finally:
     ws_mod._http_get = _orig_http
@@ -509,8 +579,8 @@ memory.set_current_agent("cto")
 _ws_root = personas.agent_workspace("cto")
 
 check("workspace 路径逃逸拦截：../ 越界读写被拒",
-      "已拦截" in ws_mod.file_read("../../agent.json")
-      and "已拦截" in ws_mod.file_write("../../evil.md", "x"),
+      "blocked" in ws_mod.file_read("../../agent.json")
+      and "blocked" in ws_mod.file_write("../../evil.md", "x"),
       f"root={_ws_root}")
 
 _ws_f = "autotest_workspace.md"
@@ -523,12 +593,30 @@ check("workspace 文件读写：覆盖/追加/读取往返正确",
       f"read={_r!r}")
 
 check("workspace strict 档：写类命令被白名单拦截、元字符被拒",
-      "已拦截" in ws_mod.shell("rm autotest_workspace.md")
-      and "已拦截" in ws_mod.shell("ls | grep x"),
+      "blocked" in ws_mod.shell("rm autotest_workspace.md")
+      and "blocked" in ws_mod.shell("ls | grep x"),
       "rm / 管道均拦截")
 
+# strict 档参数级加固：合法命令 + 越界路径参数 = 仍然拦
+_strict_blocked = [
+    ws_mod.shell("find . -delete"),      # find 的删除能力绕过只读白名单
+    ws_mod.shell("find . -ok ls"),       # find 的执行能力同理
+    ws_mod.shell("cat /etc/passwd"),     # 绝对路径读到区外
+    ws_mod.shell("cat ../../agent.json"),
+]
+_strict_ok = [
+    ws_mod.shell(f"cat {_ws_f}"),        # 区内文件放行
+    ws_mod.shell(f"grep 霓虹 {_ws_f}"),
+]
+check("workspace strict 档参数级：find -delete/-ok 与越界路径参数被拦",
+      all("blocked" in r for r in _strict_blocked),
+      f"4 例拦截：{[r.split(';')[0][:34] for r in _strict_blocked]}")
+check("workspace strict 档参数级：区内文件读取/grep 放行",
+      "霓虹灯塔" in _strict_ok[0] and "霓虹" in _strict_ok[1],
+      f"cat→{len(_strict_ok[0])} 字符、grep 命中")
+
 _ls = ws_mod.shell("ls")
-check("workspace strict 档：只读命令放行且 cwd 是工作区",
+check("workspace strict 档：只读命令放行且 cwd 是作业区",
       _ws_f in _ls, f"ls 输出含测试文件")
 
 (_ws_root / _ws_f).unlink(missing_ok=True)
@@ -541,6 +629,148 @@ check("workspace 技能过滤：cto 可见 file_read、askme 不可见",
       "按 agent.json skills 分配")
 
 # ---------------------------------------------------------------
+# 5.7 会话上下文移植（sessionIO + sessionLog 旁路日志）
+# ---------------------------------------------------------------
+print("\n===== 5.7 会话上下文移植 =====")
+import sessionIO as sio  # noqa: E402
+import core.sessionLog as slog  # noqa: E402
+
+# 纯函数：范围描述解析（不依赖 AgentsHome）
+_fake_turns = [{"ts": "2026-09-19 15:12", "user": "开场：我是零一万物销售",
+                "answer": "好的"},
+               {"ts": "2026-09-19 15:20", "user": "四层架构是什么",
+                "answer": "模型与数据层…"},
+               {"ts": "2026-09-21 09:12", "user": "比亚迪毛利率怎么看",
+                "answer": "三季度改善"}]
+check("sessionIO 范围解析：#序号 / 日期 / first-last / 原话片段",
+      sio._resolve_index(_fake_turns, "#3") == 2
+      and sio._resolve_index(_fake_turns, "2026-09-21") == 2
+      and sio._resolve_index(_fake_turns, "first") == 0
+      and sio._resolve_index(_fake_turns, "last") == 2
+      and sio._resolve_index(_fake_turns, "比亚迪 毛利率") == 2
+      and sio._resolve_index(_fake_turns, "不存在的词") is None,
+      "六种写法")
+check("sessionIO 范围收紧：scope=日期 + 起止反了报错",
+      sio._select_range(_fake_turns, "2026-09-19", "", "") == (0, 1)
+      and isinstance(sio._select_range(_fake_turns, "all", "#3", "#1"), str),
+      "单日→两轮；反向→错误文本")
+
+# 旁路日志：写入 → 读回（不受会话裁剪影响的那份原始记录）
+_sio_chat = "autotest-sio-chat"
+_sio_logf = slog.log_file("housekeeper", _sio_chat)
+try:
+    slog.log_turn("housekeeper", _sio_chat, "第一轮提问", "第一轮回答",
+                  [{"name": "kb_search", "args": {"query": "x"},
+                    "result": "命中内容" * 300}],
+                  {"model": "k3", "rounds": 2}, source="user")
+    slog.log_turn("housekeeper", _sio_chat, "[System: model switched]", "ok",
+                  [], {"model": "k3"}, source="system")
+    _back = slog.read_turns("housekeeper", _sio_chat)
+    check("sessionLog 旁路日志：写入/读回 + 工具结果预览截断",
+          len(_back) == 2 and _back[0]["user"] == "第一轮提问"
+          and _back[0]["tools"][0]["chars"] == 1200
+          and len(_back[0]["tools"][0]["preview"]) <= slog.PREVIEW_CHARS + 6
+          and _back[1]["source"] == "system",
+          f"{len(_back)} 轮，preview={len(_back[0]['tools'][0]['preview'])} 字")
+except Exception as e:  # noqa: BLE001
+    check("sessionLog 旁路日志：写入/读回 + 工具结果预览截断", False, str(e))
+
+# 外部会话导出件解析：过滤运行时元数据 + 从 memory 工具参数里抠出已固化知识
+_foreign = {"title": "零一万物销售专家AI助手",
+            "exported_at": "2026-09-21T09:51:16.287Z",
+            "messages": [
+                {"role": "user", "content": "我 = 零一万物 模型与智能体解决方案销售专家，"
+                                            "会在客户现场、会后讨论、内部培训时用你。"},
+                {"role": "user", "content": "[System: The active model for this chat "
+                                            "has changed to kimi-k3]"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "memory", "arguments":
+                     json.dumps({"action": "add", "target": "user",
+                                 "content": "用户是零一万物销售专家"},
+                                ensure_ascii=False)}}]},
+                {"role": "tool", "content": "{\"success\": true}"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "memory", "arguments":
+                     json.dumps({"action": "add",
+                                 "content": "产品为四层结构：模型与数据层…"},
+                                ensure_ascii=False)}}]},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "memory", "arguments":
+                     json.dumps({"action": "replace", "old_text": "设计（待确认）",
+                                 "new_text": "审计"}, ensure_ascii=False)}}]},
+                {"role": "assistant", "content": "已记住你的角色。"}]}
+_fp = sio._parse_foreign(_foreign)
+check("sessionIO 解析外来导出件：滤掉 [System] 注入 + 提取身份/知识/纠正",
+      _fp["kept_turns"] == 1 and len(_fp["identity"]) == 2
+      and len(_fp["knowledge"]) == 1 and _fp["corrections"] == ["设计（待确认） → 审计"]
+      and all("[System" not in x for x in _fp["identity"]),
+      f"身份{len(_fp['identity'])} 知识{len(_fp['knowledge'])} "
+      f"纠正{len(_fp['corrections'])}")
+
+# 端到端（脱网、raw 模式）：临时 AgentsHome 里跑 scan/export/import
+_orig_cfg_sio = config._config
+_tmp_root = Path(tempfile.mkdtemp(prefix="sio-agents-"))
+_tmp_out = Path(tempfile.mkdtemp(prefix="sio-work-"))
+try:
+    (_tmp_root / "housekeeper").mkdir(parents=True, exist_ok=True)
+    (_tmp_root / "shared" / "domains").mkdir(parents=True, exist_ok=True)
+    (_tmp_root / "shared" / "foreign.json").write_text(
+        json.dumps(_foreign, ensure_ascii=False), encoding="utf-8")
+    _cfg_f = _tmp_root / "agent.json"
+    _cfg_f.write_text(json.dumps({
+        "models": {"default": {"provider": "openai-compatible",
+                               "base_url": "http://x", "api_key": "k",
+                               "model": "m"}},
+        "agents": {"home": str(_tmp_root), "workspace": str(_tmp_out),
+                   "default": "housekeeper"},
+        "tools": {"skills_dir": cfg["tools"]["skills_dir"]}}), encoding="utf-8")
+    os.environ["AGENT_CONFIG"] = str(_cfg_f)
+    config._config = None
+    config.load()
+    memory.set_current_agent("housekeeper", _sio_chat)
+
+    _scan = sio.session_scan(scope="all")
+    check("session_scan：按序号列出自己的会话轮次",
+          "#1" in _scan and "第一轮提问" in _scan and "〔系统〕" in _scan,
+          _scan.splitlines()[0])
+
+    _exp = sio.session_export(start="#1", end="last", mode="raw", target="file")
+    _exp_files = list((_tmp_out / "housekeeper" / "context-export").glob("*"))
+    _md = next((p for p in _exp_files if p.suffix == ".md"), None)
+    _md_text = _md.read_text(encoding="utf-8") if _md else ""
+    check("session_export(raw/file)：md+json 落作业区、含 YAML 头与折叠附录",
+          len(_exp_files) == 2 and "type: session-export" in _md_text
+          and "附录 · 原始对话" in _md_text and "<details>" in _md_text
+          and "落盘：" in _exp,
+          f"{len(_exp_files)} 个文件")
+    check("session_export：越界/非法参数被拦",
+          "解析不出范围" in sio.session_export(start="查无此人",
+                                              mode="raw", target="file")
+          and "只支持 distill / raw" in sio.session_export(mode="x"), "范围与 mode 双校验")
+
+    _pv = sio.session_import(source="foreign.json", zone="shared", mode="raw")
+    _tgt = _tmp_root / "shared" / "domains" / "零一万物销售专家AI助手.md"
+    check("session_import(preview)：只预览不落盘",
+          "【预览 · 未落盘】" in _pv and not _tgt.exists(), f"目标不存在={not _tgt.exists()}")
+
+    _ap = sio.session_import(source="foreign.json", zone="shared", mode="raw",
+                             action="apply")
+    _doc = _tgt.read_text(encoding="utf-8") if _tgt.exists() else ""
+    check("session_import(apply)：对齐件落 shared/domains、原样引用已固化记忆",
+          _tgt.exists() and "type: domain-alignment" in _doc
+          and "对方已固化记忆（原样引用" in _doc and "四层结构" in _doc
+          and "审计" in _doc,
+          f"{len(_doc)} 字")
+finally:
+    os.environ.pop("AGENT_CONFIG", None)
+    config._config = _orig_cfg_sio
+    memory.set_current_agent("housekeeper")
+    import shutil as _sh
+    _sh.rmtree(_tmp_root, ignore_errors=True)
+    _sh.rmtree(_tmp_out, ignore_errors=True)
+    _sio_logf.unlink(missing_ok=True)
+
+# ---------------------------------------------------------------
 # 6. 调度器
 # ---------------------------------------------------------------
 print("\n===== 6. 调度器 =====")
@@ -550,8 +780,8 @@ jobs = scheduler.load_jobs()
 by_agent = {}
 for j in jobs:
     by_agent[j["agent"]] = by_agent.get(j["agent"], 0) + 1
-check("load_jobs()：每人格 1 条静默整理 + analyst 日报已停 + finance 共 4",
-      by_agent.get("analyst") == 1 and by_agent.get("finance") == 4
+check("load_jobs()：每人格 1 条静默整理 + analyst 日报已停 + finance 共 2",
+      by_agent.get("analyst") == 1 and by_agent.get("finance") == 2
       and sum(1 for j in jobs if j.get("quiet")) == len(disk_agents),
       f"{by_agent}")
 
@@ -643,7 +873,7 @@ flat = feishu_mod._flatten_post([
 ])
 check("富文本 post 展平为纯文本（text/a/at/img + 换行）",
       flat == ("第一段 链接(https://example.com)\n"
-               "@测试用户 第二段[图片]"),
+               "@测试用户 第二段[image]"),
       repr(flat[:40]))
 
 # 图文混排：_post_image_keys 提取嵌图 key
@@ -674,6 +904,7 @@ try:
         _captured.update(msgs=copy.deepcopy(kw["messages"])),
         SimpleNamespace(choices=[SimpleNamespace(message=_FakeMsg())],
                         usage=SimpleNamespace(total_tokens=1)))[1]
+    slog.log_file("finance", "test-multi-img").unlink(missing_ok=True)  # 先清旧账
     engine.run_agent_meta("test-multi-img", "看图说话", agent="finance",
                           image_b64=["b64_a", "b64_b"])
     sent = _captured["msgs"][-1]
@@ -681,11 +912,71 @@ try:
     from core.memory import SESSIONS, delete_session  # noqa: E402
     live = SESSIONS["finance:test-multi-img"][-1]
     sanitized = isinstance(live["content"], str)
+    _img_log = slog.read_turns("finance", "test-multi-img")
+    slog.log_file("finance", "test-multi-img").unlink(missing_ok=True)
     delete_session("finance", "test-multi-img")
     check("engine 多图：2 个 image_url 发出 + 历史消毒为文本",
           n_img == 2 and sanitized, f"image_url={n_img} 消毒={sanitized}")
+    check("engine 每轮自动写旁路日志（sessionLog 挂载生效）",
+          len(_img_log) == 1 and _img_log[0]["user"] == "看图说话 [图片]"
+          and _img_log[0]["answer"] == "看到了", f"{len(_img_log)} 轮")
 finally:
     engine.chat_with_retry = _orig_cwr
+
+# 工具边界兜底：技能裸 IO 抛异常 → 返回 Tool error 串，主循环不炸
+_boom_cap = {}
+_boom_state = {"n": 0}
+_orig_cwr_b = engine.chat_with_retry
+_orig_boom = engine.TOOL_FUNCTIONS.get("_boom_tool")
+
+
+def _boom_tool(**kw):
+    raise OSError("disk gone")
+
+
+class _BoomToolCallMsg:
+    content = None
+    tool_calls = [SimpleNamespace(
+        id="tc_boom",
+        function=SimpleNamespace(name="_boom_tool", arguments="{}"))]
+
+    def model_dump(self, exclude_none=True):
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "tc_boom", "type": "function",
+                                "function": {"name": "_boom_tool",
+                                             "arguments": "{}"}}]}
+
+
+def _flaky_cwr(**kw):
+    _boom_state["n"] += 1
+    if _boom_state["n"] == 1:
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=_BoomToolCallMsg())],
+            usage=SimpleNamespace(total_tokens=1))
+    _boom_cap["msgs"] = copy.deepcopy(kw["messages"])
+    return SimpleNamespace(choices=[SimpleNamespace(message=_FakeMsg())],
+                           usage=SimpleNamespace(total_tokens=1))
+
+
+try:
+    engine.TOOL_FUNCTIONS["_boom_tool"] = _boom_tool
+    engine.chat_with_retry = _flaky_cwr
+    slog.log_file("finance", "test-tool-err").unlink(missing_ok=True)
+    _ans_b, _ = engine.run_agent_meta("test-tool-err", "触发工具异常",
+                                      agent="finance")
+    _tool_out = next((m["content"] for m in _boom_cap["msgs"]
+                      if m.get("role") == "tool"), "")
+    check("工具边界兜底：技能抛异常返回 Tool error、主循环继续",
+          _ans_b == "看到了" and _tool_out.startswith("Tool error: OSError"),
+          f"tool→{_tool_out[:30]!r}")
+    slog.log_file("finance", "test-tool-err").unlink(missing_ok=True)
+    delete_session("finance", "test-tool-err")
+finally:
+    engine.chat_with_retry = _orig_cwr_b
+    if _orig_boom is None:
+        engine.TOOL_FUNCTIONS.pop("_boom_tool", None)
+    else:
+        engine.TOOL_FUNCTIONS["_boom_tool"] = _orig_boom
 
 # 引用回复的消息文本提取：text / post / 卡片三种类型都能拿出纯文本
 q_text = feishu_mod._extract_msg_text("text", json.dumps({"text": "引用我"}))
@@ -843,11 +1134,13 @@ except Exception as e:
 finally:
     memory.delete_session("designer", E2E_CHAT)  # 连内存带磁盘一起清
     memory.pop_pending("designer", E2E_CHAT)     # 模型故障时测试记的欠条也要核销
+    slog.log_file("designer", E2E_CHAT).unlink(missing_ok=True)  # 旁路日志
     if not designer_summary_pre and designer_summary.exists():
         designer_summary.unlink()
-    check("端到端残留已清理（会话 + designer summary.md）",
+    check("端到端残留已清理（会话 + designer summary.md + 旁路日志）",
           f"designer:{E2E_CHAT}" not in memory.SESSIONS
           and not memory._session_file("designer", E2E_CHAT).exists()
+          and not slog.log_file("designer", E2E_CHAT).exists()
           and (designer_summary_pre or not designer_summary.exists()),
           "内存会话已弹出")
 

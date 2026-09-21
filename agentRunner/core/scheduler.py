@@ -23,7 +23,7 @@ from datetime import datetime
 
 from .config import get
 from .log import get_logger
-from .memory import MEMORY_DIR
+from .memory import MEMORY_DIR, _atomic_write_text
 from .personas import home, list_agents
 
 log = get_logger("scheduler")
@@ -103,8 +103,8 @@ def _load_fired() -> dict:
 
 def _save_fired(fired: dict) -> None:
     try:
-        FIRED_FILE.write_text(json.dumps(fired, ensure_ascii=False),
-                              encoding="utf-8")
+        _atomic_write_text(FIRED_FILE,
+                           json.dumps(fired, ensure_ascii=False))
     except OSError as e:
         log.warning("触发记录写入失败：%s", e)
 
@@ -181,30 +181,35 @@ def start_sentinel(channels: dict, default_name: str = "default") -> None:
                 chat_id = task.get("chat_id")
                 if not chat_id:
                     continue
-                answer, meta = run_agent_meta(
-                    chat_id, task.get("text", ""), agent=agent,
-                    account=task.get("account", "sentinel"))
-                if meta.get("pending"):
-                    continue  # 模型还没恢复，欠条已被重新落盘，下轮再试
-                # 推送回原渠道；账号已下线时降级到该 agent 的推送渠道
-                channel = channels.get(task.get("account"))
-                if channel is None:
-                    target = resolve_push_channel(agent, channels, default_name)
-                    channel = target[1] if target else None
-                if channel is None:
-                    log.info("📮 [%s] 欠条已补做但无推送渠道，先留账", agent)
-                    continue
                 try:
-                    channel.send(
-                        chat_id,
-                        f"📮 {agent_display(agent)} 的补发"
-                        f"（之前模型故障的任务）\n\n{answer}")
+                    answer, meta = run_agent_meta(
+                        chat_id, task.get("text", ""), agent=agent,
+                        account=task.get("account", "sentinel"))
+                    if meta.get("pending"):
+                        continue  # 模型还没恢复，欠条已被重新落盘，下轮再试
+                    # 推送回原渠道；账号已下线时降级到该 agent 的推送渠道
+                    channel = channels.get(task.get("account"))
+                    if channel is None:
+                        target = resolve_push_channel(agent, channels, default_name)
+                        channel = target[1] if target else None
+                    if channel is None:
+                        log.info("📮 [%s] 欠条已补做但无推送渠道，先留账", agent)
+                        continue
+                    try:
+                        channel.send(
+                            chat_id,
+                            f"📮 {agent_display(agent)} 的补发"
+                            f"（之前模型故障的任务）\n\n{answer}")
+                    except Exception as e:
+                        log.warning("[%s] 欠条补发失败：%s，先留账", agent, e)
+                        continue
+                    from .memory import pop_pending
+                    pop_pending(agent, chat_id)
+                    log.info("📮 [%s] 欠条已补发并核销（%s…）", agent, chat_id[:6])
                 except Exception as e:
-                    log.warning("[%s] 欠条补发失败：%s，先留账", agent, e)
-                    continue
-                from .memory import pop_pending
-                pop_pending(agent, chat_id)
-                log.info("📮 [%s] 欠条已补发并核销（%s…）", agent, chat_id[:6])
+                    # 单条欠条补发失败不连坐：记日志留账，继续扫下一条
+                    # （教训：一条坏账曾让本轮剩余所有 agent 的欠条全部跳过）
+                    log.warning("[%s] 欠条补发异常，留账下轮再试：%s", agent, e)
 
     def loop() -> None:
         while True:

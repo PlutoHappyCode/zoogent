@@ -1,0 +1,17 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # 钉死版本，和容器 /opt/venv (3.11) 对齐；requirements.txt 只是直接依赖下限
+      - run: pip install -r agentRunner/requirements.lock
+      # 只跑可移植用例（tempfile 造 fixture，不碰私有 AgentsHome）；
+      # runAllTests.py 依赖真飞书账号/真人格，干净环境会自动守卫跳过
+      - run: cd agentRunner && python tests/runPortableTests.py

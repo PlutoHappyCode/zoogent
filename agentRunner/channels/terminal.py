@@ -43,8 +43,17 @@ class TerminalChannel(Channel):
                 answer, meta = f"出错了：{e} 😵", None
             print(f"{agent_display(get_chat_agent(self.CHAT_ID))} > {answer}")
             if meta:
-                print(f"  ({meta['model']} · {meta['tokens']} tokens"
-                      f" · 用时 {meta['elapsed']}s)")
+                parts = [meta["model"]]
+                if meta.get("rounds"):
+                    parts.append(f"{meta['rounds']}轮·{meta.get('steps', 0)}步")
+                if meta.get("llm_s") is not None:
+                    parts.append(f"LLM {meta['llm_s']}s·工具 {meta.get('tool_s', 0)}s")
+                if meta.get("out_tokens") and meta.get("llm_s"):
+                    parts.append(f"{meta['out_tokens'] / meta['llm_s']:.0f} tok/s")
+                if meta.get("in_tokens") and meta.get("cached_tokens"):
+                    parts.append(f"缓存命中 {meta['cached_tokens'] * 100 // meta['in_tokens']}%")
+                parts.append(f"用时 {meta['elapsed']}s")
+                print(f"  ({' · '.join(parts)})")
 
     def send(self, chat_id: str, text: str, meta: dict | None = None) -> None:
         """主动推送 = 直接打印（调度器输出会落到终端）"""

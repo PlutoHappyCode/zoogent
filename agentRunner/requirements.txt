@@ -1,3 +1,4 @@
+# 部署/CI 用 requirements.lock（钉死版本），本文件仅声明直接依赖
 openai>=1.0
 lark-oapi>=1.4
 pypdf>=4.0
